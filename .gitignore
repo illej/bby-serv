@@ -53,3 +53,11 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+include/
+mdns/
+nanopb/
+tags
+pb_*.c
+*.pb.[c|h]
+app
