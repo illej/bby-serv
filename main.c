@@ -43,7 +43,7 @@ static const char *get_status_msg = "{\"type\": \"GET_STATUS\", \"requestId\": 1
 // static const char *get_app_availability_msg = "{\"type\": \"GET_APP_AVAILABILITY\", \"appId\": \"CC1AD845\"}";
 
 
-#define openssl_dump_err() \
+#define OPENSSL_DUMP_ERR() \
     do { \
         int err; \
         while ((err = ERR_get_error ())) \
@@ -51,6 +51,47 @@ static const char *get_status_msg = "{\"type\": \"GET_STATUS\", \"requestId\": 1
             printf ("OpenSSL Error: %s\n", ERR_error_string (err, NULL)); \
         } \
     } while (0)
+
+static char
+ascii_ (uint8_t val)
+{
+    if (val > 31 && val < 127)
+        return val;
+    return ' ';
+}
+
+static void
+hex_dump (u8 *buf, size_t len)
+{
+    char line[1024];
+    char ascii[512];
+    int l = 0;
+    char *linep = line;
+    char *asciip = ascii;
+
+    printf ("------------------- Hex Dump ------------------\n");
+
+    for (int i = 0; i < len; i++)
+    {
+        if ((i % 8) == 0 && i != 0)
+        {
+            printf ("%02d:  %-24s\t%s\n", l++, line, ascii);
+            linep = line;
+            asciip = ascii;
+        }
+
+        linep += sprintf (linep, "%02x ", buf[i]);
+        asciip += sprintf (asciip, "%c ", ascii_ (buf[i]));
+    }
+
+    if (linep != line)
+    {
+        printf ("%02d:  %-24s\t%s\n", l, line, ascii);
+    }
+
+    printf ("\nBytes: %u\n", len);
+    printf ("-----------------------------------------------\n");
+}
 
 static bool
 encode_string (pb_ostream_t *stream, const pb_field_iter_t *field, void * const *arg)
@@ -180,29 +221,25 @@ http_read (int sk)
         }
     }
 
-    int nwritten = write (sk, response, sizeof (response) - 1);
+    int nwritten = write (csk, response, sizeof (response) - 1);
     if (nwritten < 0)
     {
         perror ("Write error");
     }
 }
 
-static char
-ascii_ (uint8_t val)
-{
-    if (val > 31 && val < 127)
-        return val;
-    return ' ';
-}
 
 static bool
 send_msg (SSL *ssl, uint8_t *send_buf, size_t send_len, const char *namespace, const char *payload)
 {
+    extensions_api_cast_channel_CastMessage msg = extensions_api_cast_channel_CastMessage_init_zero;
+    pb_ostream_t stream;
+    size_t wr;
+    bool ok ;
+
     memset (send_buf, 0, send_len);
 
-    extensions_api_cast_channel_CastMessage msg = extensions_api_cast_channel_CastMessage_init_zero;
-    pb_ostream_t stream = pb_ostream_from_buffer (send_buf + 4, send_len - 4);
-    bool ok ;
+    stream = pb_ostream_from_buffer (send_buf + 4, send_len - 4);
 
     msg.protocol_version = extensions_api_cast_channel_CastMessage_ProtocolVersion_CASTV2_1_0;
     msg.source_id.arg = (void *) "sender-0";
@@ -216,47 +253,23 @@ send_msg (SSL *ssl, uint8_t *send_buf, size_t send_len, const char *namespace, c
     msg.payload_utf8.funcs.encode = encode_string;
 
     ok = pb_encode (&stream, extensions_api_cast_channel_CastMessage_fields, &msg);
-
-    printf ("encode ok=%d\n", ok);
-
     if (ok)
     {
-        printf ("bytes written: %u\n", stream.bytes_written);
-
         send_buf[0] = (stream.bytes_written >> 24) & 0xFF;
         send_buf[1] = (stream.bytes_written >> 16) & 0xFF;
         send_buf[2] = (stream.bytes_written >>  8) & 0xFF;
         send_buf[3] = (stream.bytes_written >>  0) & 0xFF;
 
-        size_t wr;
         ok = SSL_write_ex (ssl, send_buf, stream.bytes_written + 4, &wr);
-        printf ("SSL write pb-len=%u (0x%x) wr=%zu ok=%d\n", stream.bytes_written, stream.bytes_written, wr, ok);
-
-        printf ("----------------\n");
-        fwrite (send_buf, 1, wr, stdout);
-        printf ("\n");
-        printf ("----------------\n");
-
-        char line[512];
-        int l = 0;
-        char *p = line;
-
-        for (int i = 0; i < wr; i++)
+        if (ok)
         {
-            if ((i % 8) == 0 && i != 0)
-            {
-                printf ("%02d: %s\n", l++, line);
-                p = line;
-            }
-
-            p += sprintf (p, "0x%02x(%c) ", send_buf[i], ascii_ (send_buf[i]));
+            hex_dump (send_buf, wr);
         }
+    }
 
-        if (p != line)
-        {
-            printf ("%02d: %s\n", l, line);
-        }
-        printf ("----------------\n");
+    if (!ok)
+    {
+        printf ("Send failed\n");
     }
 
     return ok;
@@ -429,7 +442,10 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
         {
             printf ("PING: should send PONG\n");
             send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, pong_msg);
-            send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
+            if (0)
+            {
+                send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
+            }
         }
     }
     else
@@ -456,39 +472,21 @@ ssl_read (SSL *ssl)
         return;
     }
 
-    while (SSL_read_ex (ssl, recv_buf, sizeof (recv_buf), &rd))
+    if (SSL_read_ex (ssl, recv_buf, sizeof (recv_buf), &rd))
     {
         printf ("rd=%d\n", rd);
         printf ("----------------\n");
         fwrite (recv_buf, 1, rd, stdout);
         printf ("\n");
         printf ("----------------\n");
-#if 1
-        char line[512];
-        int l = 0;
-        char *p = line;
 
-        for (int i = 0; i < rd; i++)
-        {
-            if ((i % 8) == 0 && i != 0)
-            {
-                printf ("%02d: %s\n", l++, line);
-                p = line;
-            }
-            p += sprintf (p, "0x%02x(%c) ", recv_buf[i], ascii_ (recv_buf[i]));
-        }
-
-        if (p != line)
-        {
-            printf ("%02d: %s\n", l, line);
-        }
-#endif
+        hex_dump (recv_buf, rd);
 
         parse_recv_msg (recv_buf, rd, ssl);
     }
 
     if (SSL_get_error (ssl, 0) != SSL_ERROR_ZERO_RETURN) {
-        printf ("Some bad\n");
+        OPENSSL_DUMP_ERR ();
     }
 }
 
@@ -661,7 +659,7 @@ int
 main (int c, char **v)
 {
 	int port = 5001;
-	int web_sk;
+	int web_sk = -1;
     int ssl_sk = -1;
     int nfds = 2;
     struct pollfd pfds[2];
@@ -709,21 +707,23 @@ main (int c, char **v)
             perror ("poll");
             return 1;
         }
-
-        for (int i = 0; i < nfds; i++)
+        else if (ret > 0)
         {
-            if (pfds[i].revents & POLLIN)
+            for (int i = 0; i < nfds; i++)
             {
-                printf ("-----------------------\n");
-                printf ("Received Packet (fd=%d)\n", pfds[i].fd);
-                printf ("-----------------------\n");
-                if (pfds[i].fd == web_sk)
+                if (pfds[i].revents & POLLIN)
                 {
-                    http_read (pfds[i].fd);
-                }
-                else if (pfds[i].fd == ssl_sk)
-                {
-                    ssl_read (ssl);
+                    printf ("-----------------------\n");
+                    printf ("Received Packet (fd=%d)\n", pfds[i].fd);
+                    printf ("-----------------------\n");
+                    if (pfds[i].fd == web_sk)
+                    {
+                        http_read (web_sk);
+                    }
+                    else if (pfds[i].fd == ssl_sk)
+                    {
+                        ssl_read (ssl);
+                    }
                 }
             }
         }
