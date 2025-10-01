@@ -28,7 +28,13 @@ if [ ! -e cast_channel.pb.c ]; then
     python nanopb/generator/nanopb_generator.py cast_channel.proto
 fi
 
-gcc -Wall -Werror main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c -I include -o app -lssl -lcrypto
+if [ ! -e tiny-json ]; then
+    git clone https://github.com/rafagafe/tiny-json.git
+    cp tiny-json/tiny-json.h include
+    cp tiny-json/tiny-json.c .
+fi
+
+gcc -Wall -Werror main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c tiny-json.c -I include -o app -lssl -lcrypto
 
 ctags -R .
 

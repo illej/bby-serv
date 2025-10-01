@@ -21,6 +21,8 @@
 #include <openssl/bio.h>
 #include <openssl/err.h>
 
+#include <tiny-json.h>
+
 #include <poll.h>
 
 typedef uint64_t u64;
@@ -40,7 +42,18 @@ static const char *connect_msg = "{\"type\": \"CONNECT\"}";
 // static const char *ping_msg = "{\"type\": \"PING\"}";
 static const char *pong_msg = "{\"type\": \"PONG\"}";
 static const char *get_status_msg = "{\"type\": \"GET_STATUS\", \"requestId\": 17}";
-// static const char *get_app_availability_msg = "{\"type\": \"GET_APP_AVAILABILITY\", \"appId\": \"CC1AD845\"}";
+static const char *get_app_availability_msg = "{\"type\": \"GET_APP_AVAILABILITY\", \"requestId\": 17, \"appId\": [\"CC1AD845\"]}";
+static const char *launch_msg ="{\"type\": \"LAUNCH\", \"requestId\": 17, \"appId\": \"CC1AD845\"}";
+
+/*
+ * TODO:
+ *  - actually control the player via "urn:x-cast:com.google.cast.media"
+ *    See:
+ *      https://developers.google.com/cast/docs/media/messages
+ *      https://developers.google.com/cast/docs/media
+ *
+ * - do web server
+ */
 
 
 #define OPENSSL_DUMP_ERR() \
@@ -91,6 +104,69 @@ hex_dump (u8 *buf, size_t len)
 
     printf ("\nBytes: %u\n", len);
     printf ("-----------------------------------------------\n");
+}
+
+static void
+json_dump (json_t const *json, int indent)
+{
+    json_t const* child;
+    jsonType_t const type = json_getType (json);
+
+    if (type != JSON_OBJ && type != JSON_ARRAY) {
+        printf ("Can't dump json\n");
+        return;
+    }
+
+    printf ("%s\n", type == JSON_OBJ? "{": "[");
+
+    indent++;
+
+    for(child = json_getChild (json); child != 0; child = json_getSibling (child))
+    {
+        jsonType_t propertyType = json_getType (child);
+        char const* name = json_getName (child);
+
+        if (name)
+        {
+            printf ("%*s\"%s\": ", indent * 4, "", name);
+        }
+
+        if (propertyType == JSON_OBJ || propertyType == JSON_ARRAY)
+        {
+            if (type == JSON_ARRAY)
+            {
+                printf ("%*s", indent * 4, "");
+            }
+
+            json_dump (child, indent);
+        }
+        else
+        {
+            char const *value = json_getValue (child);
+            if (value)
+            {
+                bool const text = JSON_TEXT == json_getType (child);
+                char const* fmt = text ? "\"%s\"" : "%s";
+
+                printf (fmt, value);
+            }
+        }
+
+        bool const last = !json_getSibling (child);
+        if (last)
+            printf ("\n");
+        else
+            printf (",\n");
+    }
+
+    indent--;
+
+    printf ("%*s%s", indent * 4, "", type == JSON_OBJ? "}": "]");
+
+    if (indent == 0)
+    {
+        printf ("\n");
+    }
 }
 
 static bool
@@ -265,7 +341,7 @@ send_msg (SSL *ssl, uint8_t *send_buf, size_t send_len, const char *namespace, c
         ok = SSL_write_ex (ssl, send_buf, stream.bytes_written + 4, &wr);
         if (ok)
         {
-            hex_dump (send_buf, wr);
+//            hex_dump (send_buf, wr);
         }
     }
 
@@ -445,8 +521,47 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
             printf ("PING: should send PONG\n");
             send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, pong_msg);
             if (0)
-            {
                 send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
+            if (0)
+                send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_app_availability_msg);
+            send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, launch_msg);
+        }
+        else if (strstr (rmsg.namespace.arg, "receiver"))
+        {
+            json_t pool[128];
+            const json_t *data;
+
+            printf ("Parsing JSON\n");
+
+#define JSON_INT(DATA, KEY, J) (((J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_INTEGER) ? json_getInteger (J) : -1) 
+#define JSON_STR(DATA, KEY, J) (((J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_TEXT) ? json_getValue (J) : NULL) 
+#define JSON_OBJ(DATA, KEY, J) (((J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_OBJ) ? json_getValue (J) : NULL) 
+            
+            data = json_create (rmsg.payload_utf8.arg, pool, sizeof (pool));
+            if (data)
+            {
+                json_dump (data, 0);
+#if 0
+                const json_t *_j = NULL;
+
+                printf ("requestId : %" PRIi64 "\n", JSON_INT (data, "requestId", _j));
+                printf ("type      : '%s'\n", JSON_STR (data, "type", _j));
+
+                const json_t *status = JSON_OBJ (data, "status", _j);
+                if (status)
+                {
+                    printf ("status    :\n");
+                    printf ("  applications :\n");
+                    for (int i = 0; i < len; i++)
+                    {
+
+                    }
+                }
+#endif
+            }
+            else
+            {
+                printf ("Failed to parse json\n");
             }
         }
     }
