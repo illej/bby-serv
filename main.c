@@ -189,12 +189,14 @@ http_read (int sk)
         return;
     }
 
-    int nread = read (sk, buf, sizeof (buf) - 1);
+    int nread = read (csk, buf, sizeof (buf) - 1);
     if (nread < 0)
     {
-        perror ("Read error");
+        printf ("Read failed: errno=%d '%s'\n", errno, strerror (errno));
         return;
     }
+
+    hex_dump ((u8 *) buf, nread);
 
     printf ("> %s\n", buf);
 
