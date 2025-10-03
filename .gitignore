@@ -57,7 +57,9 @@ dkms.conf
 include/
 mdns/
 nanopb/
+tiny-json/
 tags
 pb_*.c
-*.pb.[c|h]
+*.pb.*
+tiny-json.*
 app
