@@ -49,7 +49,7 @@ static const char *connection_ns = "urn:x-cast:com.google.cast.tp.connection";
 static const char *heartbeat_ns = "urn:x-cast:com.google.cast.tp.heartbeat";
 static const char *receiver_ns = "urn:x-cast:com.google.cast.receiver";
 static const char *connect_msg = "{\"type\": \"CONNECT\"}";
-// static const char *ping_msg = "{\"type\": \"PING\"}";
+static const char *ping_msg = "{\"type\": \"PING\"}";
 static const char *pong_msg = "{\"type\": \"PONG\"}";
 static const char *get_status_msg = "{\"type\": \"GET_STATUS\", \"requestId\": 17}";
 static const char *get_app_availability_msg = "{\"type\": \"GET_APP_AVAILABILITY\", \"requestId\": 17, \"appId\": [\"CC1AD845\"]}";
@@ -526,15 +526,26 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
         printf ("namespace      : %s\n", (char *) rmsg.namespace.arg);
         printf ("payload-utf8   : %s\n", (char *) rmsg.payload_utf8.arg);
 
+        bool ok;
         if (strstr (rmsg.payload_utf8.arg, "PING"))
         {
-            printf ("PING: should send PONG\n");
-            send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, pong_msg);
+            printf ("< PING\n");
+            ok = send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, pong_msg);
+            if (ok)
+            {
+                printf ("> PONG\n");
+            }
             if (0)
                 send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
             if (0)
                 send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_app_availability_msg);
-            send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, launch_msg);
+            if (0)
+                send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, launch_msg);
+        }
+        else if (strstr (rmsg.payload_utf8.arg, "PONG"))
+        {
+            ok = send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, ping_msg);
+            printf ("PONG: send PING: %s\n", ok ? "OK" : "Failed");
         }
         else if (strstr (rmsg.namespace.arg, "receiver"))
         {
@@ -758,7 +769,15 @@ chromecast_socket_setup (int *out_sk)
                 *out_sk = sk;
 
                 ok = send_msg (ssl, send_buf, sizeof (send_buf), connection_ns, connect_msg);
-                if (!ok)
+                if (ok)
+                {
+#if 0
+                    // TODO: don't do this unless we can queue up messages after a delay
+                    ok = send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, ping_msg);
+                    printf ("send PING: %s\n", ok ? "OK" : "Failed");
+#endif
+                }
+                else
                 {
                     printf ("Failed to send message to chromecast\n");
                 }
