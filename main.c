@@ -253,18 +253,48 @@ http_listen_socket_setup (int port, int *sk_out)
 	return ok;
 }
 
+static int
+build_response (char *buf, size_t len)
+{
+    FILE *fp;
+    int wr = 0;
+    long fsize = 0;
+    char *html;
+
+    fp = fopen ("index.html", "r");
+    if (fp)
+    {
+        fseek (fp, 0, SEEK_END);
+        fsize = ftell (fp);
+        fseek (fp, 0, SEEK_SET);
+
+        html = malloc (fsize + 1);
+        fread (html, fsize, 1, fp);
+        html[fsize] = 0;
+
+        printf ("html len=%ld\n", fsize);
+
+        wr += snprintf (buf + wr, len - wr, "HTTP/1.1 200 OK\r\n");
+        wr += snprintf (buf + wr, len - wr, "Content-Type: text/html\r\n");
+        wr += snprintf (buf + wr, len - wr, "Content-Length: %ld\r\n", fsize);
+        wr += snprintf (buf + wr, len - wr, "\r\n");
+        wr += snprintf (buf + wr, len - wr, "%s", html);
+
+        printf ("written=%d\n", wr);
+
+        fclose (fp);
+        free (html);
+    }
+
+    return wr;
+}
+
 static void
 http_read (int sk)
 {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof (client_addr);
     char buf[65535] = {};
-    char response[] = 
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html\r\n"
-        "Content-Length: 44\r\n"
-        "\r\n"
-        "<html><body><h1>Hello World!</h1></body></html>";
 
     printf ("http_read> Waiting to accept connection..\n");
 
@@ -289,16 +319,19 @@ http_read (int sk)
     char *method = strtok (buf, " \t\r\n");
     char *uri = strtok (NULL, " \t");
     char *proto = strtok (NULL, " \t\r\n");
+    int send_len = 0;
 
     printf ("method   : '%s'\n", method);
     printf ("uri      : '%s'\n", uri);
     printf ("protocol : '%s'\n", proto);
 
+    char send_buf[65535] = {};
+
     if (strcmp (uri, "/") == 0)
     {
         if (strcmp (method, "GET") == 0)
         {
-
+            send_len = build_response (send_buf, sizeof (send_buf));
         }
     }
     else if (strcmp (uri, "/play") == 0)
@@ -308,8 +341,22 @@ http_read (int sk)
 
         }
     }
+    else if (strcmp (uri, "/test") == 0)
+    {
+        char response[] = 
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Content-Length: 3\r\n"
+            "\r\n"
+            "Off";
+        send_len = snprintf (send_buf, sizeof (send_buf), "%s", response);
+    }
 
-    int nwritten = write (csk, response, sizeof (response) - 1);
+    printf ("sending:\n");
+    printf ("%s\n", send_buf);
+
+    int nwritten = write (csk, send_buf, send_len);
+    printf ("sent=%d\n", nwritten);
     if (nwritten < 0)
     {
         perror ("Write error");
@@ -562,23 +609,6 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
             if (data)
             {
                 json_dump (data, 0);
-#if 0
-                const json_t *_j = NULL;
-
-                printf ("requestId : %" PRIi64 "\n", JSON_INT (data, "requestId", _j));
-                printf ("type      : '%s'\n", JSON_STR (data, "type", _j));
-
-                const json_t *status = JSON_OBJ (data, "status", _j);
-                if (status)
-                {
-                    printf ("status    :\n");
-                    printf ("  applications :\n");
-                    for (int i = 0; i < len; i++)
-                    {
-
-                    }
-                }
-#endif
             }
             else
             {
@@ -612,6 +642,7 @@ ssl_read (SSL *ssl)
 
     if (SSL_read_ex (ssl, recv_buf, sizeof (recv_buf), &rd))
     {
+#if 0
         printf ("rd=%d\n", rd);
         printf ("----------------\n");
         fwrite (recv_buf, 1, rd, stdout);
@@ -619,6 +650,7 @@ ssl_read (SSL *ssl)
         printf ("----------------\n");
 
         hex_dump (recv_buf, rd);
+#endif
 
         parse_recv_msg (recv_buf, rd, ssl);
     }
