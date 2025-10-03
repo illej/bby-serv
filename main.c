@@ -24,12 +24,22 @@
 #include <tiny-json.h>
 
 #include <poll.h>
+#include <dirent.h>
 
 typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t  u8;
 
+
+struct movie
+{
+    u8 index;
+    char *name;
+};
+
+static struct movie *movies;
+static int movie_count;
 
 static char g__chromecast_ip[INET6_ADDRSTRLEN];
 static bool g__chromecast_found;
@@ -772,6 +782,43 @@ out:
     return ssl;
 }
 
+static bool
+movie_list (void)
+{
+    const char *movie_dir = "/mnt/usb/movies";
+    struct movie *movie;
+    struct dirent *ent;
+    DIR *dir;
+
+    movie_count = 0;
+
+    dir = opendir (movie_dir);
+    if (dir)
+    {
+        printf ("Loading movies from '%s'\n", movie_dir);
+
+        while ((ent = readdir (dir)))
+        {
+            if (ent->d_type & DT_REG)
+            {
+                movie_count++;
+
+                movies = realloc (movies, sizeof (struct movie) * movie_count);
+
+                movie = &movies[movie_count - 1];
+                movie->index = movie_count - 1;
+                movie->name = strdup (ent->d_name);
+            }
+        }
+    }
+    else
+    {
+        printf ("Failed to open directory '%s'. errno=%d '%s'\n", movie_dir, errno, strerror (errno));
+    }
+
+    return (movie_count > 0);
+}
+
 int
 main (int c, char **v)
 {
@@ -781,6 +828,12 @@ main (int c, char **v)
     int nfds = 2;
     struct pollfd pfds[2];
     SSL *ssl = NULL;
+
+    if (!movie_list ())
+    {
+        printf ("Failed to get movie list\n");
+        return 1;
+    }
 
 	if (!http_listen_socket_setup (port, &web_sk))
 	{
