@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/css/bootstrap.min.css">
+    <script>
+        function test() {
+            var xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function() {
+                if (this.readyState == 4 && this.status == 200) {
+                    <!-- document.getElementById("demo").innerHTML = this.responseText; -->
+                    document.getElementById("demo").textContent = this.responseText;
+                }
+            };
+            xhr.open("GET", "/test", true);
+            xhr.send();
+        }
+    </script>
+</head>
+<body class="container">
+    <h3>Media Server</h3>
+    <form action="/play" method="post" id="play-form"/>
+    <ul class="list-group">
+        <li class="list-group-item">hi</li>
+        <li class="list-group-item">hey</li>
+        <li class="list-group-item active">hello there</li>
+    </ul>
+    <button class="btn" type="button" onclick="test()" id="demo">On</button>
+</body>
+</html>
