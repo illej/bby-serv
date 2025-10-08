@@ -25,18 +25,35 @@
 
 #include <poll.h>
 #include <dirent.h>
+
 #include <signal.h>
+#include <execinfo.h>
+
+#include <time.h>
 
 typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t  u8;
 
+struct event
+{
+    enum {
+        TLS_SEND_PING,
+        TLS_SEND_PONG,
+        HTTP_SEND_KA,
+    } type;
+    int delay;
+    bool pending;
+    long started_at;
+};
+
 struct
 {
     int nfds;
     struct pollfd pfds[32];
     u32 streaming;
+    int mdns_sk;
     int web_sk;
     int ssl_sk;
     SSL *ssl;
@@ -44,10 +61,14 @@ struct
     enum
     {
         INIT,
+        SEARCHING,
+        CONNECTING,
         CONNECTED,
-        IDLE,
+        READY,
         PLAYING,
     } state;
+
+    struct event queue[32];
 } app = {};
 
 struct movie
@@ -56,11 +77,17 @@ struct movie
     char *name;
 };
 
+struct sig_ucontext {
+    unsigned long uc_flags;
+    ucontext_t *uc_link;
+    stack_t uc_stack;
+    struct sigcontext uc_mcontext;
+    sigset_t uc_sigmask;
+};
+
 static struct movie *movies;
 static int movie_count;
 
-static char g__chromecast_ip[INET6_ADDRSTRLEN];
-static bool g__chromecast_found;
 static uint8_t send_buf[4094];
 
 static const char *connection_ns = "urn:x-cast:com.google.cast.tp.connection";
@@ -84,6 +111,7 @@ static const char *launch_msg ="{\"type\": \"LAUNCH\", \"requestId\": 17, \"appI
  */
 
 #define ARRAY_LEN(ARR) (sizeof ((ARR)) / sizeof ((ARR)[0]))
+#define WEB_CLIENT_START 3 /* 0 = MDNS, 1 = HTTP, 2 = TLS */
 
 #define OPENSSL_DUMP_ERR() \
     do { \
@@ -93,6 +121,73 @@ static const char *launch_msg ="{\"type\": \"LAUNCH\", \"requestId\": 17, \"appI
             printf ("OpenSSL Error: %s\n", ERR_error_string (err, NULL)); \
         } \
     } while (0)
+
+static long
+time_ms (struct timespec *ts)
+{
+    return (ts->tv_sec * 1000) + (ts->tv_nsec / 1.0e6); /* milliseconds */
+}
+
+static char *
+event_str (struct event *event)
+{
+    char *str;
+
+    switch (event->type)
+    {
+        case TLS_SEND_PING: { str = "TLS-SEND-PING"; } break;
+        case TLS_SEND_PONG: { str = "TLS-SEND-PONG"; } break;
+        case HTTP_SEND_KA:  { str = "HTTP-SEND-KA";  } break;
+        default: { str = "??"; } break;
+    }
+
+    return str;
+}
+
+static void
+enqueue (int type, int delay)
+{
+    for (int i = 0; i < ARRAY_LEN (app.queue); i++)
+    {
+        struct event *e = &app.queue[i];
+
+        if (!e->pending)
+        {
+            struct timespec t;
+
+            clock_gettime (CLOCK_BOOTTIME, &t);
+
+            e->type = type;
+            e->delay = delay;
+            e->pending = true;
+            e->started_at = time_ms (&t);
+
+            printf ("queue: added %s at %ld for %d ms\n", event_str (e), e->started_at, e->delay);
+            return;
+        }
+    }
+
+    printf ("queue: full\n");
+}
+
+static char *
+app_state_str (int state)
+{
+    char *str;
+
+    switch (state)
+    {
+        case INIT:       { str = "Initialising"; } break;
+        case SEARCHING:  { str = "Searching";    } break;
+        case CONNECTING: { str = "Connecting";   } break;
+        case CONNECTED:  { str = "Connected";    } break;
+        case READY:      { str = "Ready";        } break;
+        case PLAYING:    { str = "Playing";      } break;
+        default:         { str = "??";           } break;
+    }
+
+    return str;
+}
 
 static char
 ascii_ (uint8_t val)
@@ -262,6 +357,7 @@ http_listen_socket_setup (int port, int *sk_out)
 	{
 		*sk_out = sk;
 		ok = true;
+        // enqueue (HTTP_SEND_KA, 10000);
 	}
 
 	if (!ok)
@@ -350,7 +446,7 @@ http_send (int sk, char *buf, size_t len, char *type)
 }
 
 static void
-http_event_send (int csk, char *msg)
+http_event_send (char *msg)
 {
     struct sigaction newact, oldact;
     char send_buf[66535] = {};
@@ -369,6 +465,7 @@ http_event_send (int csk, char *msg)
 
     char line[512] = {};
     char *p = line;
+    printf ("http: sending:\n");
     for (int i = 0; i < send_len; i++)
     {
         if ((i % 32) == 0 && i != 0)
@@ -390,7 +487,7 @@ http_event_send (int csk, char *msg)
     newact.sa_flags = 0;
     sigaction (SIGPIPE, &newact, &oldact);
 
-    for (int i = 2; i < ARRAY_LEN (app.pfds); i++)
+    for (int i = WEB_CLIENT_START; i < ARRAY_LEN (app.pfds); i++)
     {
         if (app.streaming & (1 << i))
         {
@@ -481,19 +578,6 @@ http_accept (int sk)
 static int
 http_read (int csk)
 {
-#if 0
-    struct sockaddr_in client_addr;
-    socklen_t addr_len = sizeof (client_addr);
-    char buf[65535] = {};
-
-    int csk = accept (sk, (struct sockaddr *) &client_addr, &addr_len);
-    if (csk < 0)
-    {
-        printf ("accept() failed: errno=%d '%s'\n", errno, strerror (errno));
-        return;
-    }
-#endif
-
     char buf[65535] = {};
     int nread = read (csk, buf, sizeof (buf));
     if (nread < 0)
@@ -583,12 +667,12 @@ http_read (int csk)
         send_len = build_response (data, strlen (data), "text/html", send_buf, sizeof (send_buf));
 
         http_send (csk, send_buf, send_len, "RSP");
-        http_event_send (0, "Clicked");
+        http_event_send ("Clicked");
     }
     else if (strcmp (uri, "/events") == 0 &&
              strcmp (method, "GET") == 0)
     {
-        for (int i = 2; i < ARRAY_LEN (app.pfds); i++)
+        for (int i = WEB_CLIENT_START; i < ARRAY_LEN (app.pfds); i++)
         {
             if (app.pfds[i].fd == csk)
             {
@@ -598,6 +682,7 @@ http_read (int csk)
         printf ("http: client:%d streaming:%b\n", csk, app.streaming);
 
         http_event_send_start (csk);
+        http_event_send (app_state_str (app.state));
     }
     else
     {
@@ -648,7 +733,7 @@ send_msg (SSL *ssl, uint8_t *send_buf, size_t send_len, const char *namespace, c
 
     if (!ok)
     {
-        printf ("Send failed\n");
+        printf ("tls: send failed\n");
     }
 
     return ok;
@@ -818,16 +903,28 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
 //        printf ("payload-utf8   : %s\n", (char *) rmsg.payload_utf8.arg);
 
         bool ok;
+
+        /* We've received valid messages from the chromecast so we're now
+         * officially connected */
+        if (app.state == CONNECTING)
+        {
+            send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
+            send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_app_availability_msg);
+            app.state = CONNECTED;
+        }
+
         if (strstr (rmsg.payload_utf8.arg, "PING"))
         {
-            printf ("< PING\n");
+            printf ("tls: <- PING\n");
+            enqueue (TLS_SEND_PONG, 0);
+#if 0
             ok = send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, pong_msg);
             if (ok)
             {
                 printf ("> PONG\n");
 
-                if (1)
-                    http_event_send (0, "Connected");
+                if (0)
+                    http_event_send ("Connected");
             }
             if (0)
                 send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
@@ -835,11 +932,13 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
                 send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_app_availability_msg);
             if (0)
                 send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, launch_msg);
+#endif
         }
         else if (strstr (rmsg.payload_utf8.arg, "PONG"))
         {
-            ok = send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, ping_msg);
-            printf ("PONG: send PING: %s\n", ok ? "OK" : "Failed");
+            printf ("tls: <- P0NG\n");
+            enqueue (TLS_SEND_PING, 5000);
+
         }
         else if (strstr (rmsg.namespace.arg, "receiver"))
         {
@@ -876,7 +975,7 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
 
 
 static void
-ssl_read (SSL *ssl)
+tls_read (SSL *ssl)
 {
     size_t rd;
     u8 recv_buf[1024] = {};
@@ -890,12 +989,6 @@ ssl_read (SSL *ssl)
     if (SSL_read_ex (ssl, recv_buf, sizeof (recv_buf), &rd))
     {
 #if 0
-        printf ("rd=%d\n", rd);
-        printf ("----------------\n");
-        fwrite (recv_buf, 1, rd, stdout);
-        printf ("\n");
-        printf ("----------------\n");
-
         hex_dump (recv_buf, rd);
 #endif
 
@@ -909,8 +1002,8 @@ ssl_read (SSL *ssl)
 
 static int
 _query_cb (int sk, const struct sockaddr *from, size_t from_len, mdns_entry_type_t entry, uint16_t query_id, uint16_t rtype,
-		uint16_t rclass, uint32_t ttl, const void *data,
-		size_t size, size_t name_offset, size_t name_len, size_t record_offset, size_t record_len, void *user_data)
+        uint16_t rclass, uint32_t ttl, const void *data,
+        size_t size, size_t name_offset, size_t name_len, size_t record_offset, size_t record_len, void *user_data)
 {
     char ipstr[INET6_ADDRSTRLEN];
     char entrybuf[256];
@@ -918,31 +1011,30 @@ _query_cb (int sk, const struct sockaddr *from, size_t from_len, mdns_entry_type
 
     inet_ntop (from->sa_family, &((struct sockaddr_in *) from)->sin_addr, ipstr, sizeof (ipstr));
 
-	const char* entrytype = (entry == MDNS_ENTRYTYPE_ANSWER) ? "answer" :
+    const char *entrytype = (entry == MDNS_ENTRYTYPE_ANSWER) ? "answer" :
                             ((entry == MDNS_ENTRYTYPE_AUTHORITY) ? "authority" : "additional");
-
-	mdns_string_t entrystr = mdns_string_extract (data, size, &name_offset, entrybuf, sizeof(entrybuf));
-
+    mdns_string_t entrystr = mdns_string_extract (data, size, &name_offset, entrybuf, sizeof(entrybuf));
 
     if (rtype == MDNS_RECORDTYPE_PTR) {
         mdns_string_t namestr = mdns_record_parse_ptr (data, size, record_offset, record_len, namebuf, sizeof (namebuf));
 
-		printf ("  %s : %s %.*s PTR %.*s rclass 0x%x ttl %u length %zu\n",
-		       ipstr, entrytype, MDNS_STRING_FORMAT (entrystr),
-		       MDNS_STRING_FORMAT (namestr), rclass, ttl, record_len);
+        printf ("  %s : %s %.*s PTR %.*s rclass 0x%x ttl %u length %zu\n",
+                ipstr, entrytype, MDNS_STRING_FORMAT (entrystr),
+                MDNS_STRING_FORMAT (namestr), rclass, ttl, record_len);
 
         char *chromecast = "_googlecast._tcp.local";
 
         if (strncmp (namestr.str, chromecast, strlen (chromecast)) == 0)
         {
             printf ("> chromecase found at %s\n", ipstr);
-            snprintf (g__chromecast_ip, sizeof (g__chromecast_ip), "%s", ipstr);
-            g__chromecast_found = true;
+            snprintf (app.chromecast_ip, sizeof (app.chromecast_ip), "%s", ipstr);
         }
     }
 
-	return 0;
+    return 0;
 }
+
+
 
 static bool
 mdns_setup (void)
@@ -995,15 +1087,16 @@ mdns_setup (void)
  * https://docs.openssl.org/3.3/man7/ossl-guide-tls-client-block
  */
 static SSL *
-chromecast_socket_setup (int *out_sk)
+tls_socket_setup (int *out_sk)
 {
+    struct sockaddr_in addr;
     SSL_CTX *ctx = NULL;
     SSL *ssl = NULL;
     BIO *bio = NULL;
     int sk;
     bool ok;
 
-    printf ("SSL: socket setup\n");
+    printf ("tls: socket setup\n");
     
     SSL_library_init ();
     SSL_load_error_strings ();
@@ -1011,11 +1104,10 @@ chromecast_socket_setup (int *out_sk)
     sk = socket (AF_INET, SOCK_STREAM, 0);
     if (sk > -1)
     {
-        struct sockaddr_in addr;
 
         addr.sin_family = AF_INET;
         addr.sin_port = htons (8009);
-        inet_pton (AF_INET, g__chromecast_ip, &addr.sin_addr);
+        inet_pton (AF_INET, app.chromecast_ip, &addr.sin_addr);
 
         if (connect (sk, (struct sockaddr *) &addr, sizeof (addr)) == 0)
         {
@@ -1043,19 +1135,18 @@ chromecast_socket_setup (int *out_sk)
                 if (ret != 1)
                     goto out;
 
-                printf ("SSL connect: %d\n", ret);
+                //printf ("SSL connect: %d\n", ret);
 
                 *out_sk = sk;
 
                 ok = send_msg (ssl, send_buf, sizeof (send_buf), connection_ns, connect_msg);
                 if (ok)
                 {
-#if 1
-                    // TODO: don't do this unless we can queue up messages after a delay
-                    // ok = send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, ping_msg);
+#if 0
                     ok = send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
-                    printf ("send GET_STATUS: %s\n", ok ? "OK" : "Failed");
+                    printf ("TLS: send GET_STATUS: %s\n", ok ? "OK" : "Failed");
 #endif
+
                 }
                 else
                 {
@@ -1069,7 +1160,7 @@ chromecast_socket_setup (int *out_sk)
         }
         else
         {
-            printf ("Failed to connect to server %s\n", g__chromecast_ip);
+            printf ("Failed to connect to server %s\n", app.chromecast_ip);
         }
     }
     else
@@ -1077,6 +1168,7 @@ chromecast_socket_setup (int *out_sk)
         perror ("Failed to open socket\n");
     }
 
+    printf ("tls: setup: %s\n", ok ? "OK" : "Failed");
 out:
     return ssl;
 }
@@ -1118,13 +1210,52 @@ movie_list (void)
     return (movie_count > 0);
 }
 
-int
+static void
+signal_handler (int sig, siginfo_t *info, void *ucontext)
+{
+    fprintf (stderr, "Signal %d (%s)\n", sig, strsignal (sig));
+
+    abort ();
+}
+
+static void
+do_event (struct event *event)
+{
+    printf ("queue: do event %s\n", event_str (event));
+    switch (event->type)
+    {
+        case TLS_SEND_PING:
+            send_msg (app.ssl, send_buf, sizeof (send_buf), heartbeat_ns, ping_msg);
+            printf ("tls: -> PING\n");
+            break;
+        case TLS_SEND_PONG:
+            send_msg (app.ssl, send_buf, sizeof (send_buf), heartbeat_ns, pong_msg);
+            printf ("tls: -> PONG\n");
+            break;
+        case HTTP_SEND_KA:
+            http_event_send (":keep-alive");
+            enqueue (HTTP_SEND_KA, 10000);
+            break;
+    }
+
+    event->pending = false;
+}
+
+    int
 main (int c, char **v)
 {
-	int port = 5001;
-	int web_sk = -1;
-    int ssl_sk = -1;
-    SSL *ssl = NULL;
+    u8 mdns_rbuf[2048] = {};
+    int port = 5001;
+    struct sigaction act = {
+        .sa_sigaction = signal_handler,
+        .sa_flags = SA_RESTART | SA_SIGINFO,
+    };
+
+    if (sigaction (SIGSEGV, &act, (struct sigaction *) NULL) != 0)
+    {
+        printf ("Failed to setup signal handler\n");
+        return 1;
+    }
 
     if (!movie_list ())
     {
@@ -1132,49 +1263,107 @@ main (int c, char **v)
         return 1;
     }
 
-	if (!http_listen_socket_setup (port, &web_sk))
-	{
-		return 1;
-	}
-
-    app.web_sk = web_sk;
-
-	if (!mdns_setup ())
-	{
-		return 1;
-	}
-
-    if (!g__chromecast_found)
+    if ((app.mdns_sk = mdns_socket_open_ipv4 (NULL)) == -1)
     {
-        printf ("Unable to find chromecast\n");
+        printf ("Failed to setup MDNS socket\n");
         return 1;
     }
 
-    ssl = chromecast_socket_setup (&ssl_sk);
-
-    if (ssl_sk == -1)
+    if (!http_listen_socket_setup (port, &app.web_sk))
     {
-        printf ("Failed to setup SSL socket\n");
+        printf ("Failed to setup HTTP socket\n");
         return 1;
     }
 
-    app.ssl = ssl;
+    printf ("Baby's First Web Server\n");
+    printf ("Listening on port %d\n", port);
 
-	printf ("Baby's First Web Server\n");
-    printf ("Chromecast IP: %s\n", g__chromecast_ip);
-	printf ("Listening on port %d\n", port);
-
-    app.pfds[0].fd = web_sk;
+    app.pfds[0].fd = app.mdns_sk;
     app.pfds[0].events = POLLIN;
-    app.pfds[1].fd = ssl_sk;
+    app.pfds[1].fd = app.web_sk;
     app.pfds[1].events = POLLIN;
-    app.nfds = 2;
+    app.pfds[2].fd = app.ssl_sk;
+    app.pfds[2].events = POLLIN;
+    app.nfds = 3;
 
-	while (1)
-	{
-        printf ("> polling (%d)\n", app.nfds);
-        int ret = poll (app.pfds, app.nfds, -1);
-        printf ("  ret=%d\n", ret);
+    int timeout = 5000;
+    app.state = INIT;
+
+    while (1)
+    {
+        printf ("app: %s\n", app_state_str (app.state));
+
+        int shortest_timeout = 20000;
+        struct timespec ts;
+        long now;
+
+        clock_gettime (CLOCK_BOOTTIME, &ts);
+        now = time_ms (&ts);
+
+        printf ("queue: check pending events\n");
+        for (int i = 0; i < ARRAY_LEN (app.queue); i++)
+        {
+            struct event *e = &app.queue[i];
+
+            if (e->pending)
+            {
+                long time_waited = now - e->started_at;
+                long remaining = e->delay - time_waited;
+                printf ("queue: event %s has waited %ld/%ld ms\n", event_str (e), time_waited, e->delay);
+                if (remaining <= 0)
+                {
+                    do_event (e);
+                }
+                else if (remaining > 0 && remaining < shortest_timeout)
+                {
+                    shortest_timeout = remaining;
+                    printf ("queue: new shortest timeout: %ld ms\n", shortest_timeout);
+                }
+            }
+        }
+
+        timeout = shortest_timeout;
+
+        if (app.state == INIT)
+        {
+            mdns_discovery_send (app.mdns_sk);
+            timeout = 5000;
+
+            app.state = SEARCHING;
+            http_event_send (app_state_str (app.state));
+        }
+        else if (app.state == SEARCHING)
+        {
+            if (app.chromecast_ip[0] != '\0')
+            {
+                app.state = CONNECTING;
+                http_event_send (app_state_str (app.state));
+
+                app.ssl = tls_socket_setup (&app.ssl_sk);
+                if (!(app.ssl && app.ssl_sk > 0))
+                {
+                    printf ("Failed to setup TLS socket\n");
+                }
+                else
+                {
+                    app.pfds[2].fd = app.ssl_sk;
+                    app.pfds[2].events = POLLIN;
+
+                    enqueue (TLS_SEND_PING, 0);
+                }
+            }
+        }
+        else if (app.state == CONNECTING)
+        {
+            // maybe check last time we sent/received a ping/pong and do something
+        }
+        else if (app.state == CONNECTED)
+        {
+            // send_msg (app.ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
+        }
+
+        printf ("poll: nfds=%d timeout=%ld\n", app.nfds, timeout);
+        int ret = poll (app.pfds, app.nfds, timeout);
         if (ret == -1)
         {
             perror ("poll");
@@ -1182,29 +1371,39 @@ main (int c, char **v)
         }
         else if (ret > 0)
         {
-            /* check web listen socket first */
             if (app.pfds[0].revents & POLLIN)
             {
-                http_accept (web_sk);
+                printf ("mdns: recv\n");
+                mdns_discovery_recv (app.mdns_sk, mdns_rbuf, sizeof (mdns_rbuf), _query_cb, NULL);
+                ret--;
+            }
+
+            /* check web listen socket first */
+            if (app.pfds[1].revents & POLLIN)
+            {
+                printf ("http: accept\n");
+                http_accept (app.web_sk);
                 ret--;
             }
 
             /* check TLS listen socket first */
-            if (app.pfds[1].revents & POLLIN)
+            if (app.pfds[2].revents & POLLIN)
             {
-                ssl_read (ssl);
+                printf ("tls: recv\n");
+                tls_read (app.ssl);
                 ret--;
             }
 
             /* check web client sockets */
-            int i = 2;
-            while (ret > 0)
+            int i = WEB_CLIENT_START;
+            while (ret > 0 && i < ARRAY_LEN (app.pfds))
             {
+                printf ("http-client(%d): read\n", i);
                 if (app.pfds[i].revents & POLLIN)
                 {
                     if (http_read (app.pfds[i].fd) <= 0)
                     {
-                        printf ("http: client %d closed\n", app.pfds[i].fd);
+                        printf ("http-client(%d) closed\n", app.pfds[i].fd);
 
                         close (app.pfds[i].fd);
 
@@ -1213,6 +1412,7 @@ main (int c, char **v)
                         app.nfds--;
 
                         app.streaming &= ~(1 << i);
+                        printf ("http-streaming: 0b%b\n", app.streaming);
                     }
                     ret--;
                 }
@@ -1221,7 +1421,7 @@ main (int c, char **v)
         }
 	}
 
-    close (web_sk);
+    close (app.web_sk);
 
 	printf ("Exiting\n");
 	return 0;

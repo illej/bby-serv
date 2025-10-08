@@ -38,7 +38,7 @@
             es = new EventSource('/events');
             es.onmessage = function(e) {
                 console.log('ehsa: ' + event.data);
-                document.getElementById('status').innerHTML += '<li class="list-group-item">' + event.data + '</li>';
+                document.getElementById('status').textContent = event.data;
 
             };
             es.onopen = function(e) {
@@ -55,14 +55,13 @@
         if (typeof(EventSource) !== "undefined") {
             event_source_setup();
         } else {
-            document.getElementById('status').innerHTML = '<li class="list-group-item"> UNSUPPORTED </li>';
+            document.getElementById('status').textContent = 'Unsupported';
         }
     </script>
 </head>
 <body class="container">
     <h3>Media Server</h3>
-    <ul class="list-group" id="status">
-    </ul>
+    <h4 id="status"></h4>
     <form action="/play" method="post" id="play-form"/>
     <ul class="list-group">
         <li class="list-group-item">hi</li>

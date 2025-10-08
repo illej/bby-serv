@@ -35,7 +35,7 @@ if [ ! -e tiny-json ]; then
 fi
 
 # gcc -Wall -Werror main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c tiny-json.c -I include -o app -lssl -lcrypto
-gcc main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c tiny-json.c -I include -o app -lssl -lcrypto
+gcc main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c tiny-json.c -I include -o app -lssl -lcrypto -g -rdynamic
 
 ctags -R .
 
