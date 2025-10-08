@@ -1,25 +1,68 @@
 <!doctype html>
 <html lang="en">
 <head>
+    <title>Baby's First Media Server</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/css/bootstrap.min.css">
+    <link rel="icon" href="/favicon.ico">
     <script>
         function test() {
             var xhr = new XMLHttpRequest();
             xhr.onreadystatechange = function() {
                 if (this.readyState == 4 && this.status == 200) {
-                    <!-- document.getElementById("demo").innerHTML = this.responseText; -->
                     document.getElementById("demo").textContent = this.responseText;
                 }
             };
             xhr.open("GET", "/test", true);
             xhr.send();
+        };
+
+        var reconnect_freq_sec = 1;
+        var es;
+
+        function reconnect() {
+            console.log('ehsa: reconnect in ' + reconnect_freq_sec + ' seconds');
+
+            setTimeout(event_source_setup, reconnect_freq_sec * 1000);
+
+            reconnect_freq_sec *= 2;
+            if (reconnect_freq_sec >= 64) {
+                reconnect_freq_sec = 64;
+            }
+        }
+
+        function event_source_setup() {
+            console.log('ehsa: EventSource setup');
+
+            es = new EventSource('/events');
+            es.onmessage = function(e) {
+                console.log('ehsa: ' + event.data);
+                document.getElementById('status').innerHTML += '<li class="list-group-item">' + event.data + '</li>';
+
+            };
+            es.onopen = function(e) {
+                console.log('ehsa: open');
+                reconnect_freq_sec = 1;
+            };
+            es.onerror = function(e) {
+                console.log('ehsa: error');
+                es.close();
+                reconnect();
+            };
+        }
+
+        if (typeof(EventSource) !== "undefined") {
+            event_source_setup();
+        } else {
+            document.getElementById('status').innerHTML = '<li class="list-group-item"> UNSUPPORTED </li>';
         }
     </script>
 </head>
 <body class="container">
     <h3>Media Server</h3>
+    <ul class="list-group" id="status">
+    </ul>
     <form action="/play" method="post" id="play-form"/>
     <ul class="list-group">
         <li class="list-group-item">hi</li>

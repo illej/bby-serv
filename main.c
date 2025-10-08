@@ -25,12 +25,30 @@
 
 #include <poll.h>
 #include <dirent.h>
+#include <signal.h>
 
 typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t  u8;
 
+struct
+{
+    int nfds;
+    struct pollfd pfds[32];
+    u32 streaming;
+    int web_sk;
+    int ssl_sk;
+    SSL *ssl;
+    char chromecast_ip[INET6_ADDRSTRLEN];
+    enum
+    {
+        INIT,
+        CONNECTED,
+        IDLE,
+        PLAYING,
+    } state;
+} app = {};
 
 struct movie
 {
@@ -65,6 +83,7 @@ static const char *launch_msg ="{\"type\": \"LAUNCH\", \"requestId\": 17, \"appI
  * - do web server
  */
 
+#define ARRAY_LEN(ARR) (sizeof ((ARR)) / sizeof ((ARR)[0]))
 
 #define OPENSSL_DUMP_ERR() \
     do { \
@@ -80,7 +99,7 @@ ascii_ (uint8_t val)
 {
     if (val > 31 && val < 127)
         return val;
-    return ' ';
+    return '.';
 }
 
 static void
@@ -235,7 +254,7 @@ http_listen_socket_setup (int port, int *sk_out)
 	{
 		perror ("Failed to bind socket");
 	}
-	else if (listen (sk, 10) != 0)
+	else if (listen (sk, 32) != 0)
 	{
 		perror ("Failed to listen on socket");
 	}
@@ -254,113 +273,338 @@ http_listen_socket_setup (int port, int *sk_out)
 }
 
 static int
-build_response (char *buf, size_t len)
+build_response (char *data, size_t datalen, char *mime, char *buf, size_t buflen)
+{
+    int wr = 0;
+
+    wr += snprintf (buf + wr, buflen - wr, "HTTP/1.1 200 OK\r\n");
+    wr += snprintf (buf + wr, buflen - wr, "Content-Type: %s\r\n", mime);
+    wr += snprintf (buf + wr, buflen - wr, "Content-Length: %ld\r\n", datalen);
+    wr += snprintf (buf + wr, buflen - wr, "\r\n");
+    memcpy (buf + wr, data, datalen);
+    wr += datalen;
+    wr += snprintf (buf + wr, buflen - wr, "\r\n");
+
+    return wr;
+}
+
+static int
+build_response_from_file (char *file, char *mime, char *buf, size_t len)
 {
     FILE *fp;
     int wr = 0;
     long fsize = 0;
-    char *html;
+    char *data;
 
-    fp = fopen ("index.html", "r");
+    fp = fopen (file, "r");
     if (fp)
     {
         fseek (fp, 0, SEEK_END);
         fsize = ftell (fp);
         fseek (fp, 0, SEEK_SET);
 
-        html = malloc (fsize + 1);
-        fread (html, fsize, 1, fp);
-        html[fsize] = 0;
+        data = malloc (fsize + 1);
+        fread (data, fsize, 1, fp);
+        data[fsize] = 0;
 
-        printf ("html len=%ld\n", fsize);
+//        printf ("data len=%ld\n", fsize);
 
         wr += snprintf (buf + wr, len - wr, "HTTP/1.1 200 OK\r\n");
-        wr += snprintf (buf + wr, len - wr, "Content-Type: text/html\r\n");
+        wr += snprintf (buf + wr, len - wr, "Content-Type: %s\r\n", mime);
         wr += snprintf (buf + wr, len - wr, "Content-Length: %ld\r\n", fsize);
         wr += snprintf (buf + wr, len - wr, "\r\n");
-        wr += snprintf (buf + wr, len - wr, "%s", html);
+        memcpy (buf + wr, data, fsize);
+        wr += fsize;
+        wr += snprintf (buf + wr, len - wr, "\r\n");
 
-        printf ("written=%d\n", wr);
+//        printf ("response len=%d\n", wr);
 
         fclose (fp);
-        free (html);
+        free (data);
+    }
+    else
+    {
+        printf ("Failed to open file '%s'\n", file);
     }
 
     return wr;
 }
 
 static void
-http_read (int sk)
+http_send (int sk, char *buf, size_t len, char *type)
 {
+    int wr = 0;
+
+    do {
+        wr = write (sk, buf + wr, len - wr);
+    } while (wr > 0 && wr < len);
+
+    if (wr == len)
+    {
+        printf ("http: SEND [%s] -> client(%d): OK %d bytes\n", type, sk, wr);
+    }
+    else
+    {
+        printf ("http: SEND [%s] -> client(%d): Failed %d errno:%d '%s'\n", type, sk, wr, errno, strerror (errno));
+    }
+}
+
+static void
+http_event_send (int csk, char *msg)
+{
+    struct sigaction newact, oldact;
+    char send_buf[66535] = {};
+
+    char hdr[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Connection: keep-alive\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache, private\r\n";
+    int send_len = 0;
+
+//    send_len += snprintf (send_buf + send_len, sizeof (send_buf) - send_len, "%s", hdr);
+//    send_len += snprintf (send_buf + send_len, sizeof (send_buf) - send_len, "\r\n");
+    send_len += snprintf (send_buf + send_len, sizeof (send_buf) - send_len, "%x\r\ndata: %s\n\n", strlen (msg) + 8, msg);
+    send_len += snprintf (send_buf + send_len, sizeof (send_buf) - send_len, "\r\n");
+
+    char line[512] = {};
+    char *p = line;
+    for (int i = 0; i < send_len; i++)
+    {
+        if ((i % 32) == 0 && i != 0)
+        {
+            printf ("%s\n", line);
+            p = line;
+        }
+
+        p += sprintf (p, "%c", ascii_ (send_buf[i]));
+    }
+
+    if (p != line)
+    {
+        printf ("%s\n", line);
+    }
+
+    newact.sa_handler = SIG_IGN;
+    sigemptyset (&newact.sa_mask);
+    newact.sa_flags = 0;
+    sigaction (SIGPIPE, &newact, &oldact);
+
+    for (int i = 2; i < ARRAY_LEN (app.pfds); i++)
+    {
+        if (app.streaming & (1 << i))
+        {
+            http_send (app.pfds[i].fd, send_buf, send_len, "EVT");
+        }
+    }
+
+    sigaction (SIGPIPE, &oldact, NULL);
+}
+
+static void
+http_event_send_start (int csk)
+{
+    char hdr[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Connection: keep-alive\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "\r\n"
+        "e\r\ndata: Hello!\n\n"
+        "\r\n";
+    int hdr_len = strlen (hdr);
+
+    char line[512] = {};
+    char *p = line;
+    for (int i = 0; i < hdr_len; i++)
+    {
+        if ((i % 32) == 0 && i != 0)
+        {
+            printf ("%s\n", line);
+            p = line;
+        }
+
+        p += sprintf (p, "%c", ascii_ (hdr[i]));
+    }
+
+    if (p != line)
+    {
+        printf ("%s\n", line);
+    }
+
+    struct sigaction newact, oldact;
+    newact.sa_handler = SIG_IGN;
+    sigemptyset (&newact.sa_mask);
+    newact.sa_flags = 0;
+    sigaction (SIGPIPE, &newact, &oldact);
+
+    http_send (csk, hdr, hdr_len, "EVT");
+
+    sigaction (SIGPIPE, &oldact, NULL);
+}
+
+static void
+add_web_client_fd (int sk)
+{
+    if (app.nfds + 1 < ARRAY_LEN (app.pfds))
+    {
+        app.pfds[app.nfds].fd = sk;
+        app.pfds[app.nfds].events = POLLIN;
+        app.nfds++;
+
+        printf ("http: added client fd=%d\n", sk);
+    }
+    else
+    {
+        printf ("http: too many web clients\n");
+    }
+}
+
+static void
+http_accept (int sk)
+{
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof (client_addr);
+
+    int csk = accept (sk, (struct sockaddr *) &client_addr, &addr_len);
+    if (csk > -1)
+    {
+        add_web_client_fd (csk);
+    }
+    else
+    {
+        printf ("accept() failed: errno=%d '%s'\n", errno, strerror (errno));
+    }
+}
+
+static int
+http_read (int csk)
+{
+#if 0
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof (client_addr);
     char buf[65535] = {};
 
-    printf ("http_read> Waiting to accept connection..\n");
-
     int csk = accept (sk, (struct sockaddr *) &client_addr, &addr_len);
     if (csk < 0)
     {
-        perror ("Failed to accept connection");
+        printf ("accept() failed: errno=%d '%s'\n", errno, strerror (errno));
         return;
     }
+#endif
 
-    int nread = read (csk, buf, sizeof (buf) - 1);
+    char buf[65535] = {};
+    int nread = read (csk, buf, sizeof (buf));
     if (nread < 0)
     {
-        printf ("Read failed: errno=%d '%s'\n", errno, strerror (errno));
-        return;
+        printf ("read() on=%d failed: errno=%d '%s'\n", csk, errno, strerror (errno));
+        return nread;
+    }
+    else if (nread == 0)
+    {
+        printf ("read() on=%d not quite right? only 0 bytes\n", csk);
+        return nread;
     }
 
-    hex_dump ((u8 *) buf, nread);
-
-    printf ("> %s\n", buf);
+//    hex_dump ((u8 *) buf, nread);
+//    printf ("-------------HTTP Request--------------\n");
+//    printf ("%s", buf);
+//    printf ("---------------------------------------\n");
 
     char *method = strtok (buf, " \t\r\n");
     char *uri = strtok (NULL, " \t");
     char *proto = strtok (NULL, " \t\r\n");
-    int send_len = 0;
+    char *agent = NULL;
 
-    printf ("method   : '%s'\n", method);
-    printf ("uri      : '%s'\n", uri);
-    printf ("protocol : '%s'\n", proto);
+    /**
+     * Extract substring from header
+     *
+     * Given header: 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0'
+     * Returns     : 'Windows NT'
+     */
+    char line[1024] = {};
+    char *p = line;
+    for (int i = 0; i < nread; i++)
+    {
+        p += sprintf (p, "%c", buf[i]);
+
+        if (buf[i] == 0x0A)
+        {
+            if (strstr (line, "User-Agent: Mozilla"))
+            {
+                agent = strtok (line, "(");
+                agent = strtok (NULL, ";");
+                break;
+            }
+            else if (strstr (line, "curl"))
+            {
+                agent = "curl";
+                break;
+            }
+
+            p = line;
+        }
+    }
+
+    if (!agent)
+	    agent = "--";
+
+    u16 port = 0;// ntohs (client_addr.sin_port);
+
+    printf ("http: RECV [REQ] <- client='%s'(sk=%d port=%u): %s '%s'\n", agent, csk, port, method, uri);
 
     char send_buf[65535] = {};
+    int send_len = 0;
+    char *event_msg = NULL;
 
-    if (strcmp (uri, "/") == 0)
+    if (strcmp (uri, "/") == 0 &&
+        strcmp (method, "GET") == 0)
     {
-        if (strcmp (method, "GET") == 0)
+        send_len = build_response_from_file ("index.html", "text/html", send_buf, sizeof (send_buf));
+        http_send (csk, send_buf, send_len, "RSP");
+    }
+    else if (strcmp (uri, "/favicon.ico") == 0 &&
+             strcmp (method, "GET") == 0)
+    {
+        send_len = build_response_from_file ("favicon.ico", "image/x-icon", send_buf, sizeof (send_buf));
+        http_send (csk, send_buf, send_len, "RSP");
+    }
+    else if (strcmp (uri, "/play") == 0 &&
+             strcmp (method, "POST") == 0)
+    {
+
+    }
+    else if (strcmp (uri, "/test") == 0 &&
+             strcmp (method, "GET") == 0)
+    {
+        char *data = "Off";
+
+        send_len = build_response (data, strlen (data), "text/html", send_buf, sizeof (send_buf));
+
+        http_send (csk, send_buf, send_len, "RSP");
+        http_event_send (0, "Clicked");
+    }
+    else if (strcmp (uri, "/events") == 0 &&
+             strcmp (method, "GET") == 0)
+    {
+        for (int i = 2; i < ARRAY_LEN (app.pfds); i++)
         {
-            send_len = build_response (send_buf, sizeof (send_buf));
+            if (app.pfds[i].fd == csk)
+            {
+                app.streaming |= (1 << i);
+            }
         }
-    }
-    else if (strcmp (uri, "/play") == 0)
-    {
-        if (strcmp (method, "POST") == 0)
-        {
+        printf ("http: client:%d streaming:%b\n", csk, app.streaming);
 
-        }
+        http_event_send_start (csk);
     }
-    else if (strcmp (uri, "/test") == 0)
+    else
     {
-        char response[] = 
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/html\r\n"
-            "Content-Length: 3\r\n"
-            "\r\n"
-            "Off";
-        send_len = snprintf (send_buf, sizeof (send_buf), "%s", response);
+        printf ("ERROR: unhandled url/verb combination '%s' '%s'\n", uri, method);
     }
 
-    printf ("sending:\n");
-    printf ("%s\n", send_buf);
-
-    int nwritten = write (csk, send_buf, send_len);
-    printf ("sent=%d\n", nwritten);
-    if (nwritten < 0)
-    {
-        perror ("Write error");
-    }
+    return nread;
 }
 
 
@@ -549,29 +793,29 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
         if (tag.wire == VARINT)
         {
             bytes += decode_varint (buf + bytes, &varint);
-            printf ("%d %s : %" PRIu64 "\n", tag.fieldno, field_str (tag.fieldno), varint);
+//            printf ("%d %s : %" PRIu64 "\n", tag.fieldno, field_str (tag.fieldno), varint);
         }
         else if (tag.wire == LEN)
         {
             bytes += decode_varint (buf + bytes, &varint);
-            printf ("%d %s : %s(%" PRIu64 ") '%.*s'\n", tag.fieldno, field_str (tag.fieldno), wire_str (tag.wire), varint, (int) varint, (char *) buf + bytes);
+ //           printf ("%d %s : %s(%" PRIu64 ") '%.*s'\n", tag.fieldno, field_str (tag.fieldno), wire_str (tag.wire), varint, (int) varint, (char *) buf + bytes);
             bytes += (int) varint;
         }
     }
 
-    printf ("consumed %d bytes (out of %d)\n", bytes, len);
+    //printf ("consumed %d bytes (out of %d)\n", bytes, len);
 
     pb_istream_t stream = pb_istream_from_buffer ((uint8_t *) buf, rlen);
     int ret = pb_decode (&stream, extensions_api_cast_channel_CastMessage_fields, &rmsg);
 
-    printf ("decode ok=%d\n", ret);
+    //printf ("decode ok=%d\n", ret);
     if (ret)
     {
-        printf ("version        : %d\n", rmsg.protocol_version);
-        printf ("source-id      : %s\n", (char *) rmsg.source_id.arg);
-        printf ("destination-id : %s\n", (char *) rmsg.destination_id.arg);
-        printf ("namespace      : %s\n", (char *) rmsg.namespace.arg);
-        printf ("payload-utf8   : %s\n", (char *) rmsg.payload_utf8.arg);
+//        printf ("version        : %d\n", rmsg.protocol_version);
+//        printf ("source-id      : %s\n", (char *) rmsg.source_id.arg);
+//        printf ("destination-id : %s\n", (char *) rmsg.destination_id.arg);
+//        printf ("namespace      : %s\n", (char *) rmsg.namespace.arg);
+//        printf ("payload-utf8   : %s\n", (char *) rmsg.payload_utf8.arg);
 
         bool ok;
         if (strstr (rmsg.payload_utf8.arg, "PING"))
@@ -581,6 +825,9 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
             if (ok)
             {
                 printf ("> PONG\n");
+
+                if (1)
+                    http_event_send (0, "Connected");
             }
             if (0)
                 send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
@@ -803,10 +1050,11 @@ chromecast_socket_setup (int *out_sk)
                 ok = send_msg (ssl, send_buf, sizeof (send_buf), connection_ns, connect_msg);
                 if (ok)
                 {
-#if 0
+#if 1
                     // TODO: don't do this unless we can queue up messages after a delay
-                    ok = send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, ping_msg);
-                    printf ("send PING: %s\n", ok ? "OK" : "Failed");
+                    // ok = send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, ping_msg);
+                    ok = send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
+                    printf ("send GET_STATUS: %s\n", ok ? "OK" : "Failed");
 #endif
                 }
                 else
@@ -876,8 +1124,6 @@ main (int c, char **v)
 	int port = 5001;
 	int web_sk = -1;
     int ssl_sk = -1;
-    int nfds = 2;
-    struct pollfd pfds[2];
     SSL *ssl = NULL;
 
     if (!movie_list ())
@@ -890,6 +1136,8 @@ main (int c, char **v)
 	{
 		return 1;
 	}
+
+    app.web_sk = web_sk;
 
 	if (!mdns_setup ())
 	{
@@ -910,19 +1158,23 @@ main (int c, char **v)
         return 1;
     }
 
+    app.ssl = ssl;
+
 	printf ("Baby's First Web Server\n");
     printf ("Chromecast IP: %s\n", g__chromecast_ip);
 	printf ("Listening on port %d\n", port);
 
-    pfds[0].fd = web_sk;
-    pfds[0].events = POLLIN;
-    pfds[1].fd = ssl_sk;
-    pfds[1].events = POLLIN;
+    app.pfds[0].fd = web_sk;
+    app.pfds[0].events = POLLIN;
+    app.pfds[1].fd = ssl_sk;
+    app.pfds[1].events = POLLIN;
+    app.nfds = 2;
 
 	while (1)
 	{
-        printf ("\npolling\n");
-        int ret = poll (pfds, nfds, -1);
+        printf ("> polling (%d)\n", app.nfds);
+        int ret = poll (app.pfds, app.nfds, -1);
+        printf ("  ret=%d\n", ret);
         if (ret == -1)
         {
             perror ("poll");
@@ -930,22 +1182,41 @@ main (int c, char **v)
         }
         else if (ret > 0)
         {
-            for (int i = 0; i < nfds; i++)
+            /* check web listen socket first */
+            if (app.pfds[0].revents & POLLIN)
             {
-                if (pfds[i].revents & POLLIN)
+                http_accept (web_sk);
+                ret--;
+            }
+
+            /* check TLS listen socket first */
+            if (app.pfds[1].revents & POLLIN)
+            {
+                ssl_read (ssl);
+                ret--;
+            }
+
+            /* check web client sockets */
+            int i = 2;
+            while (ret > 0)
+            {
+                if (app.pfds[i].revents & POLLIN)
                 {
-                    printf ("-----------------------\n");
-                    printf ("Received Packet (fd=%d)\n", pfds[i].fd);
-                    printf ("-----------------------\n");
-                    if (pfds[i].fd == web_sk)
+                    if (http_read (app.pfds[i].fd) <= 0)
                     {
-                        http_read (web_sk);
+                        printf ("http: client %d closed\n", app.pfds[i].fd);
+
+                        close (app.pfds[i].fd);
+
+                        app.pfds[i].fd = -1;
+                        app.pfds[i].events = 0;
+                        app.nfds--;
+
+                        app.streaming &= ~(1 << i);
                     }
-                    else if (pfds[i].fd == ssl_sk)
-                    {
-                        ssl_read (ssl);
-                    }
+                    ret--;
                 }
+                i++;
             }
         }
 	}
