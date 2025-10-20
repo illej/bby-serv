@@ -11,22 +11,28 @@
 #include <sys/time.h>
 #include <errno.h>
 
+
 #include <pb_encode.h>
 #include <pb_decode.h>
+#include "pb_encode.c"
+#include "pb_decode.c"
+#include "pb_common.c"
 #include "cast_channel.pb.h"
+#include "cast_channel.pb.c"
+
 
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
 
 #include <tiny-json.h>
+#include "tiny-json.c"
 
 #include <poll.h>
 #include <dirent.h>
 
 #include <signal.h>
 #include <execinfo.h>
-
 
 
 #include "app.h"

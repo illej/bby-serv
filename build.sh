@@ -35,8 +35,14 @@ if [ ! -e tiny-json ]; then
 fi
 
 # gcc -Wall -Werror main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c tiny-json.c -I include -o app -lssl -lcrypto
-gcc main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c tiny-json.c -I include -o app -lssl -lcrypto -g -rdynamic
+#
+# TODO: maybe try a Makefile to see if we can further reduce build times
+# real    0m18.984s -> 0m15.693s
+# user    0m17.755s -> 0m15.057s
+# sys     0m1.141s  -> 0m0.531s
+# time gcc main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c tiny-json.c -I include -o app -lssl -lcrypto -g -rdynamic
+time gcc main.c -I include -o app -lssl -lcrypto -g -rdynamic
 
-ctags -R .
+time ctags -R .
 
 exit 0
