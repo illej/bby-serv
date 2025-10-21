@@ -278,9 +278,7 @@ http_read (struct web_server *web, int csk)
     if (!agent)
         agent = "--";
 
-    u16 port = 0;// ntohs (client_addr.sin_port);
-
-    printf ("http: RECV [REQ] <- client='%s'(sk=%d port=%u): %s '%s'\n", agent, csk, port, method, uri);
+    printf ("http: RECV [REQ] <- client='%s'(sk=%d): %s '%s'\n", agent, csk, method, uri);
 
     char send_buf[65535] = {};
     int send_len = 0;
