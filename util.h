@@ -1,6 +1,8 @@
 #ifndef _UTIL_H_
 #define _UTIL_H_
 
+#include <stdio.h>
+#include <stdint.h>
 #include <time.h>
 
 #define ARRAY_LEN(ARR) (sizeof ((ARR)) / sizeof ((ARR)[0]))
@@ -10,7 +12,7 @@ typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t  u8;
 
-char
+static char
 ascii_ (uint8_t val)
 {
     if (val > 31 && val < 127)
@@ -18,7 +20,7 @@ ascii_ (uint8_t val)
     return '.';
 }
 
-void
+static void
 hex_dump (u8 *buf, size_t len)
 {
     char line[1024];
@@ -51,7 +53,7 @@ hex_dump (u8 *buf, size_t len)
     printf ("-----------------------------------------------\n");
 }
 
-long
+static long
 time_ms (void)
 {
     struct timespec t;
@@ -59,4 +61,5 @@ time_ms (void)
     clock_gettime (CLOCK_BOOTTIME, &t);
     return (t.tv_sec * 1000) + (t.tv_nsec / 1.0e6); /* milliseconds */
 }
+
 #endif

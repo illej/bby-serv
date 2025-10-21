@@ -1,6 +1,8 @@
 #ifndef _WEB_H
 #define _WEB_H
 
+#include <stdbool.h>
+
 struct web_server
 {
     u16 port;

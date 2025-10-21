@@ -1,8 +1,14 @@
+#include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <unistd.h>
+#include <signal.h>
+#include <poll.h>
+#include <netinet/in.h>
 
-#include "util.h"
 #include "app.h"
-
-#define WEB_CLIENT_START 3 /* 0 = MDNS, 1 = HTTP, 2 = TLS */
+#include "util.h"
+#include "web.h"
 
 static int
 build_response (char *data, size_t datalen, char *mime, char *buf, size_t buflen)

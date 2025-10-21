@@ -18,15 +18,12 @@
 #include "pb_decode.c"
 #include "pb_common.c"
 #include "cast_channel.pb.h"
-#include "cast_channel.pb.c"
-
 
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
 
 #include <tiny-json.h>
-#include "tiny-json.c"
 
 #include <poll.h>
 #include <dirent.h>
@@ -43,8 +40,6 @@
 #include "discovery.c"
 
 #include "web.h"
-#include "web.c"
-
 
 struct delayed_msg
 {
