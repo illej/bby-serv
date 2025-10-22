@@ -184,21 +184,44 @@ http_event_send_start (int csk)
 }
 
 static void
-add_web_client_fd (struct web_server *web, int sk)
+web_client_add (struct web_server *web, int sk)
 {
-    if (app_nfds () + 1 < MAX_FD)
-    {
-        web->clients[web->client_count].fd = sk;
-        web->clients[web->client_count].events = POLLIN;
-        web->client_count++;
+    int printed = 0;
 
-        printf ("http: added client fd=%d\n", sk);
+    if (web->client_count + 1 < WEB_CLIENT_MAX)
+    {
+        for (int i = 0; i < WEB_CLIENT_MAX; i++)
+        {
+            printf ("http: finding free client slot [%d].fd=%d\n", i, web->clients[i].fd);
+            if (web->clients[i].fd == -1)
+            {
+                web->clients[i].fd = sk;
+                web->clients[i].events = POLLIN;
+                web->client_count++;
+
+                printf ("http: added client fd[%d]=%d\n", i, sk);
+                break;
+            }
+        }
     }
     else
     {
         printf ("http: too many web clients\n");
     }
+
+    printf ("Web Clients (count=%d)\n", web->client_count);
+    for (int i = 0; i < WEB_CLIENT_MAX; i++)
+    {
+        if (printed == web->client_count)
+            break;
+
+        printf (" [%d] .fd=%d .streaming=%d\n", i, web->clients[i].fd, !!(web->streaming & (1 << i)));
+
+        if (web->clients[i].fd > 0)
+            printed++;
+    }
 }
+
 
 void
 http_accept (struct web_server *web)
@@ -209,11 +232,43 @@ http_accept (struct web_server *web)
     int csk = accept (web->listen_sk, (struct sockaddr *) &client_addr, &addr_len);
     if (csk > -1)
     {
-        add_web_client_fd (web, csk);
+        web_client_add (web, csk);
     }
     else
     {
         printf ("accept() failed: errno=%d '%s'\n", errno, strerror (errno));
+    }
+}
+
+static void
+web_client_del (struct web_server *web, int csk)
+{
+    int printed = 0;
+
+    for (int i = 0; i < WEB_CLIENT_MAX; i++)
+    {
+        if (web->clients[i].fd == csk)
+        {
+            close (web->clients[i].fd);
+
+            web->clients[i].fd = -1;
+            web->clients[i].events = 0;
+            web->streaming &= ~(1 << i);
+            web->client_count--;
+            break;
+        }
+    }
+
+    printf ("Web Clients (count=%d)\n", web->client_count);
+    for (int i = 0; i < WEB_CLIENT_MAX; i++)
+    {
+        if (printed == web->client_count)
+            break;
+
+        printf (" [%d] .fd=%d .streaming=%d\n", i, web->clients[i].fd, !!(web->streaming & (1 << i)));
+
+        if (web->clients[i].fd > 0)
+            printed++;
     }
 }
 
@@ -227,11 +282,13 @@ http_read (struct web_server *web, int csk)
     if (nread < 0)
     {
         printf ("read() on=%d failed: errno=%d '%s'\n", csk, errno, strerror (errno));
+        web_client_del (web, csk);
         return nread;
     }
     else if (nread == 0)
     {
         printf ("read() on=%d not quite right? only 0 bytes\n", csk);
+        web_client_del (web, csk);
         return nread;
     }
 
@@ -372,6 +429,27 @@ http_listen_socket_setup (struct web_server *web)
     if (!ok)
     {
         close (sk);
+    }
+
+    return ok;
+}
+
+bool
+http_init (struct web_server *web, struct pollfd *clients, u16 port)
+{
+    bool ok;
+
+    web->port = port;
+    web->clients = clients;
+    for (int i = 0; i < WEB_CLIENT_MAX; i++)
+    {
+        web->clients[i].fd = -1;
+    }
+
+    ok = http_listen_socket_setup (web);
+    if (!ok)
+    {
+        printf ("Failed to setup HTTP socket\n");
     }
 
     return ok;

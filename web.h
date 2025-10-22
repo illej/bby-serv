@@ -2,6 +2,8 @@
 #define _WEB_H
 
 #include <stdbool.h>
+#include <poll.h>
+#include "util.h"
 
 struct web_server
 {
@@ -13,6 +15,7 @@ struct web_server
     u32 streaming;
 };
 
+bool http_init (struct web_server *web, struct pollfd *clients, u16 port);
 void http_send (int sk, char *buf, size_t len, char *type);
 void http_event_send (struct web_server *web, char *msg);
 void http_event_send_start (int csk);

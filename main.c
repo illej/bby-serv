@@ -863,11 +863,8 @@ main (int c, char **v)
         return 1;
     }
 
-    app.web.port = 5001;
-    app.web.clients = &app.pfds[WEB_CLIENT_FD_START];
-    if (!http_listen_socket_setup (&app.web))
+    if (!http_init (&app.web, &app.pfds[WEB_CLIENT_FD_START], 5001))
     {
-        printf ("Failed to setup HTTP socket\n");
         return 1;
     }
 
@@ -925,9 +922,9 @@ main (int c, char **v)
         timeout = shortest_timeout;
 
         printf ("poll: nfds=%d timeout=%ld\n", app_nfds (), timeout);
-        int ret = poll (app.pfds, app_nfds (), timeout);
+        int ret = poll (app.pfds, MAX_FD, timeout);
 
-        for (int i = 0; ret > 0 && i < app_nfds (); i++)
+        for (int i = 0; ret > 0 && i < MAX_FD; i++)
         {
             if (app.pfds[i].revents & POLLIN)
             {
@@ -949,20 +946,10 @@ main (int c, char **v)
                 }
                 else
                 {
-                    printf ("http: read fd[%d]=%d\n", i, app.pfds[i].fd);
+                    printf ("http: read from client(%d) fd=%d\n", i - WEB_CLIENT_FD_START, app.pfds[i].fd);
                     if (http_read (&app.web, app.pfds[i].fd) <= 0)
                     {
-                        printf ("http-client(%d) closed\n", app.pfds[i].fd);
-
-                        close (app.pfds[i].fd);
-
-                        // TODO: might need to keep the valid pfds contiguous
-                        app.pfds[i].fd = -1;
-                        app.pfds[i].events = 0;
-                        app.web.client_count--;
-
-                        app.web.streaming &= ~(1 << i);
-                        printf ("http-streaming: 0b%b\n", app.web.streaming);
+                        printf ("http-client(%d) closed\n", i - WEB_CLIENT_FD_START);
                     }
                 }
             }
