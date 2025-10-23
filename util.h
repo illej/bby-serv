@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <time.h>
 
 #define ARRAY_LEN(ARR) (sizeof ((ARR)) / sizeof ((ARR)[0]))
@@ -11,6 +12,21 @@ typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
 typedef uint8_t  u8;
+
+// TODO: rename to 'timer'?
+struct delayed_msg
+{
+    enum {
+        TLS_SEND_PING,
+        TLS_SEND_PONG,
+        HTTP_SEND_KA,
+    } type;
+    int delay;
+    bool pending;
+    long started_at;
+};
+
+void enqueue (int type, int delay);
 
 static char
 ascii_ (uint8_t val)
