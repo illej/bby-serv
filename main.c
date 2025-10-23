@@ -11,23 +11,21 @@
 #include <sys/time.h>
 #include <errno.h>
 
-
 #include <poll.h>
 #include <dirent.h>
 
 #include <signal.h>
 #include <execinfo.h>
 
-
 #include "app.h"
 #include "util.h"
 #include "event.h"
 
-#include "discovery.h"
-#include "discovery.c"
-
 #include "web.h"
 #include "cast.h"
+
+#include "discovery.h"
+#include "discovery.c"
 
 struct
 {
@@ -42,12 +40,28 @@ struct
     struct delayed_msg queue[32];
 } app = {};
 
+struct movie
+{
+    u8 index;
+    char *name;
+};
+
+static struct movie *movies;
+static int movie_count;
 static struct action fsm[STATE_MAX][EVENT_MAX] = {
     [STATE_INIT]       [EVENT_SEARCH]    = { action_search,  STATE_SEARCHING  },
     [STATE_SEARCHING]  [EVENT_FOUND]     = { action_connect, STATE_CONNECTING },
     [STATE_CONNECTING] [EVENT_CONNECTED] = { action_status,  STATE_READY      },
     [STATE_CONNECTING] [EVENT_RESET]     = { action_search,  STATE_SEARCHING  },
 };
+
+/*
+ * TODO:
+ *  - actually control the player via "urn:x-cast:com.google.cast.media"
+ *    See:
+ *      https://developers.google.com/cast/docs/media/messages
+ *      https://developers.google.com/cast/docs/media
+ */
 
 char *
 state_str (int state)
@@ -184,29 +198,6 @@ event (int event, void *data)
         http_event_send (&app.web, state_str (app.state));
     }
 }
-
-
-
-struct movie
-{
-    u8 index;
-    char *name;
-};
-
-static struct movie *movies;
-static int movie_count;
-
-
-
-/*
- * TODO:
- *  - actually control the player via "urn:x-cast:com.google.cast.media"
- *    See:
- *      https://developers.google.com/cast/docs/media/messages
- *      https://developers.google.com/cast/docs/media
- *
- * - do web server
- */
 
 
 
