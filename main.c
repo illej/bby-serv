@@ -837,6 +837,39 @@ app_nfds (void)
     return WEB_CLIENT_FD_START + app.web.client_count;
 }
 
+static long
+process_timers (void)
+{
+    long shortest_timeout = 20000;
+    long now = time_ms ();
+
+    for (int i = 0; i < ARRAY_LEN (app.queue); i++)
+    {
+        struct delayed_msg *msg = &app.queue[i];
+
+        if (msg->pending)
+        {
+            long time_waited = now - msg->started_at;
+            long remaining = msg->delay - time_waited;
+
+            printf ("queue: %s has waited %ld/%ld ms\n", msg_str (msg), time_waited, msg->delay);
+
+            if (remaining <= 0)
+            {
+                do_send (msg);
+            }
+            else if (remaining > 0 && remaining < shortest_timeout)
+            {
+                shortest_timeout = remaining;
+            }
+        }
+    }
+
+    printf ("queue: timeout: %ld ms\n", shortest_timeout);
+
+    return shortest_timeout;
+}
+
 int
 main (int c, char **v)
 {
@@ -890,36 +923,7 @@ main (int c, char **v)
             event (EVENT_SEARCH, NULL);
         }
 
-        int shortest_timeout = 20000;
-        long now = time_ms ();
-
-        printf ("queue: check pending msgs\n");
-
-        for (int i = 0; i < ARRAY_LEN (app.queue); i++)
-        {
-            struct delayed_msg *msg = &app.queue[i];
-
-            if (msg->pending)
-            {
-                long time_waited = now - msg->started_at;
-                long remaining = msg->delay - time_waited;
-
-                printf ("queue: msg %s has waited %ld/%ld ms\n", msg_str (msg), time_waited, msg->delay);
-
-                if (remaining <= 0)
-                {
-                    do_send (msg);
-                }
-                else if (remaining > 0 && remaining < shortest_timeout)
-                {
-                    shortest_timeout = remaining;
-
-                    printf ("queue: new shortest timeout: %ld ms\n", shortest_timeout);
-                }
-            }
-        }
-
-        timeout = shortest_timeout;
+        timeout = process_timers ();
 
         printf ("poll: nfds=%d timeout=%ld\n", app_nfds (), timeout);
         int ret = poll (app.pfds, MAX_FD, timeout);
