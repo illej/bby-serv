@@ -39,6 +39,7 @@ char *event_str (int event);
 void action_search (void *data);
 void action_connect (void *data);
 void action_status (void *data);
+void action_reset (void *data);
 
 void event (int event, void *data);
 

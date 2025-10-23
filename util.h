@@ -17,6 +17,7 @@ typedef uint8_t  u8;
 struct delayed_msg
 {
     enum {
+        RESET,
         TLS_SEND_PING,
         TLS_SEND_PONG,
         HTTP_SEND_KA,

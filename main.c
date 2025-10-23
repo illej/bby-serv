@@ -50,9 +50,10 @@ static struct movie *movies;
 static int movie_count;
 static struct action fsm[STATE_MAX][EVENT_MAX] = {
     [STATE_INIT]       [EVENT_SEARCH]    = { action_search,  STATE_SEARCHING  },
+    [STATE_SEARCHING]  [EVENT_RESET]     = { action_reset,   STATE_INIT       },
     [STATE_SEARCHING]  [EVENT_FOUND]     = { action_connect, STATE_CONNECTING },
     [STATE_CONNECTING] [EVENT_CONNECTED] = { action_status,  STATE_READY      },
-    [STATE_CONNECTING] [EVENT_RESET]     = { action_search,  STATE_SEARCHING  },
+    [STATE_CONNECTING] [EVENT_RESET]     = { action_reset,   STATE_INIT       },
 };
 
 /*
@@ -113,6 +114,13 @@ void
 action_search (void *data)
 {
     mdns_send (app.mdns_sk);
+    enqueue (RESET, 20000);
+}
+
+void
+action_reset (void *data)
+{
+    memset (app.chromecast_ip, 0, sizeof (app.chromecast_ip));
 }
 
 static char *
@@ -122,6 +130,7 @@ msg_str (struct delayed_msg *msg)
 
     switch (msg->type)
     {
+        case RESET:         { str = "RESET";         } break;
         case TLS_SEND_PING: { str = "TLS-SEND-PING"; } break;
         case TLS_SEND_PONG: { str = "TLS-SEND-PONG"; } break;
         case HTTP_SEND_KA:  { str = "HTTP-SEND-KA";  } break;
@@ -154,22 +163,42 @@ enqueue (int type, int delay)
 }
 
 void
+timer_cancel (int type)
+{
+    for (int i = 0; i < ARRAY_LEN (app.queue); i++)
+    {
+        struct delayed_msg *msg = &app.queue[i];
+
+        if (msg->type == type && msg->pending)
+        {
+            msg->pending = false;
+            printf ("queue: cancelled %s\n", msg_str (msg));
+        }
+    }
+}
+
+void
 action_connect (void *data)
 {
+    timer_cancel (RESET);
+
     app.ssl = tls_socket_setup (&app.ssl_sk, (char *) data);
     if (!(app.ssl && app.ssl_sk > 0))
     {
         printf ("Failed to setup TLS socket\n");
+
         event (EVENT_RESET, NULL);
     }
     else
     {
         printf ("tls: ok\n");
 
+        snprintf (app.chromecast_ip, sizeof (app.chromecast_ip), data);
+
         app.pfds[TLS_FD].fd = app.ssl_sk;
         app.pfds[TLS_FD].events = POLLIN;
 
-        enqueue (TLS_SEND_PING, 0);
+//         enqueue (TLS_SEND_PING, 0);
     }
 }
 
@@ -253,13 +282,16 @@ do_send (struct delayed_msg *msg)
     printf ("queue: do send %s\n", msg_str (msg));
     switch (msg->type)
     {
+        case RESET:
+            event (EVENT_RESET, NULL);
+            break;
         case TLS_SEND_PING:
             tls_send_msg (app.ssl, heartbeat_ns, ping_msg);
-            printf ("tls: -> PING\n");
+            // printf ("tls: -> PING\n");
             break;
         case TLS_SEND_PONG:
             tls_send_msg (app.ssl, heartbeat_ns, pong_msg);
-            printf ("tls: -> PONG\n");
+            // printf ("tls: -> PONG\n");
             break;
         case HTTP_SEND_KA:
             http_event_send (&app.web, ":keep-alive");
@@ -350,21 +382,18 @@ main (int c, char **v)
     app.pfds[WEB_FD].fd = app.web.listen_sk;
     app.pfds[WEB_FD].events = POLLIN;
 
-    int timeout = 5000;
     app.state = STATE_INIT;
 
     while (1)
     {
-        printf ("app: %s\n", state_str (app.state));
-
         if (app.chromecast_ip[0] == '\0')
         {
             event (EVENT_SEARCH, NULL);
         }
 
-        timeout = process_timers ();
+        int timeout = process_timers ();
 
-        printf ("poll: nfds=%d timeout=%ld\n", app_nfds (), timeout);
+        printf ("app: %s poll: nfds=%d timeout=%ld\n", app_state (), app_nfds (), timeout);
         int ret = poll (app.pfds, MAX_FD, timeout);
 
         for (int i = 0; ret > 0 && i < MAX_FD; i++)
