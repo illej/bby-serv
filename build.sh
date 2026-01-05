@@ -34,6 +34,8 @@ if [ ! -e tiny-json ]; then
     cp tiny-json/tiny-json.c .
 fi
 
+rm -f core
+
 # gcc -Wall -Werror main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c tiny-json.c -I include -o app -lssl -lcrypto
 #
 # TODO: maybe try a Makefile to see if we can further reduce build times
@@ -41,7 +43,7 @@ fi
 # user    0m17.755s -> 0m15.057s
 # sys     0m1.141s  -> 0m0.531s
 # time gcc main.c cast_channel.pb.c pb_encode.c pb_decode.c pb_common.c tiny-json.c -I include -o app -lssl -lcrypto -g -rdynamic
-time gcc main.c -I include -o app -lssl -lcrypto -g -rdynamic
+time gcc main.c -DUNITY_BUILD -g -rdynamic -I include -o app -lssl -lcrypto
 
 time ctags -R .
 

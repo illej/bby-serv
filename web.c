@@ -5,10 +5,16 @@
 #include <signal.h>
 #include <poll.h>
 #include <netinet/in.h>
+#include <fcntl.h>
 
 #include "app.h"
 #include "util.h"
 #include "web.h"
+#include "event.h"
+
+#ifndef O_LARGEFILE
+#define O_LARGEFILE 0
+#endif
 
 static int
 build_response (char *data, size_t datalen, char *mime, char *buf, size_t buflen)
@@ -105,6 +111,7 @@ http_event_send (struct web_server *web, char *msg)
     send_len += snprintf (send_buf + send_len, sizeof (send_buf) - send_len, "%x\r\ndata: %s\n\n", strlen (msg) + 8, msg);
     send_len += snprintf (send_buf + send_len, sizeof (send_buf) - send_len, "\r\n");
 
+#if 0
     char line[512] = {};
     char *p = line;
     printf ("http: sending:\n");
@@ -123,6 +130,7 @@ http_event_send (struct web_server *web, char *msg)
     {
         printf ("%s\n", line);
     }
+#endif
 
     newact.sa_handler = SIG_IGN;
     sigemptyset (&newact.sa_mask);
@@ -154,6 +162,7 @@ http_event_send_start (int csk)
         "\r\n";
     int hdr_len = strlen (hdr);
 
+#if 0
     char line[512] = {};
     char *p = line;
     for (int i = 0; i < hdr_len; i++)
@@ -171,6 +180,7 @@ http_event_send_start (int csk)
     {
         printf ("%s\n", line);
     }
+#endif
 
     struct sigaction newact, oldact;
     newact.sa_handler = SIG_IGN;
@@ -192,14 +202,14 @@ web_client_add (struct web_server *web, int sk)
     {
         for (int i = 0; i < WEB_CLIENT_MAX; i++)
         {
-            printf ("http: finding free client slot [%d].fd=%d\n", i, web->clients[i].fd);
+            // printf ("http: finding free client slot [%d].fd=%d\n", i, web->clients[i].fd);
             if (web->clients[i].fd == -1)
             {
                 web->clients[i].fd = sk;
                 web->clients[i].events = POLLIN;
                 web->client_count++;
 
-                printf ("http: added client fd[%d]=%d\n", i, sk);
+                // printf ("http: added client fd[%d]=%d\n", i, sk);
                 break;
             }
         }
@@ -209,6 +219,7 @@ web_client_add (struct web_server *web, int sk)
         printf ("http: too many web clients\n");
     }
 
+#if 0
     printf ("Web Clients (count=%d)\n", web->client_count);
     for (int i = 0; i < WEB_CLIENT_MAX; i++)
     {
@@ -220,6 +231,7 @@ web_client_add (struct web_server *web, int sk)
         if (web->clients[i].fd > 0)
             printed++;
     }
+#endif
 }
 
 
@@ -259,6 +271,7 @@ web_client_del (struct web_server *web, int csk)
         }
     }
 
+#if 0
     printf ("Web Clients (count=%d)\n", web->client_count);
     for (int i = 0; i < WEB_CLIENT_MAX; i++)
     {
@@ -270,7 +283,50 @@ web_client_del (struct web_server *web, int csk)
         if (web->clients[i].fd > 0)
             printed++;
     }
+#endif
 }
+
+static char *
+parse_header (char *buf, size_t buflen, char *hdr, char *value, size_t value_len)
+{
+    char line[1024] = {};
+    char *p = line;
+    char *val = NULL;
+
+    for (int i = 0; i < buflen; i++)
+    {
+        p += sprintf (p, "%c", buf[i]);
+
+        if (buf[i] == 0x0A)
+        {
+            if (strstr (line, hdr))
+            {
+                val = strtok (line, ":");
+                val = strtok (NULL, "\r\n");
+                if (val)
+                {
+                    /* eat any whitespace */
+                    while (*val++)
+                    {
+                        if (is_ascii (*val))
+                            break;
+                    }
+
+                    snprintf (value, value_len, "%s", val);
+                    printf ("Found header: [%s] -> [%s]\n", hdr, val);
+                    break;
+                }
+            }
+
+            p = line;
+        }
+    }
+
+    return NULL;
+}
+
+static char big_buf[1024 * 1024 * 1]; // 1 Mb
+static char send_buf[1024 * 1024 * 2]; // 2 Mb
 
 int
 http_read (struct web_server *web, int csk)
@@ -292,10 +348,12 @@ http_read (struct web_server *web, int csk)
         return nread;
     }
 
-    //    hex_dump ((u8 *) buf, nread);
-    //    printf ("-------------HTTP Request--------------\n");
-    //    printf ("%s", buf);
-    //    printf ("---------------------------------------\n");
+#if 1
+    printf ("-------------HTTP Request--------------\n");
+    printf ("%s\n", buf);
+    printf ("---------------------------------------\n");
+    // hex_dump ((u8 *) buf, nread);
+#endif
 
     char *method = strtok (buf, " \t\r\n");
     char *uri = strtok (NULL, " \t");
@@ -337,29 +395,31 @@ http_read (struct web_server *web, int csk)
 
     printf ("http: RECV [REQ] <- client='%s'(sk=%d): %s '%s'\n", agent, csk, method, uri);
 
-    char send_buf[65535] = {};
     int send_len = 0;
     char *event_msg = NULL;
 
     if (strcmp (uri, "/") == 0 &&
-            strcmp (method, "GET") == 0)
+        strcmp (method, "GET") == 0)
     {
         send_len = build_response_from_file ("index.html", "text/html", send_buf, sizeof (send_buf));
         http_send (csk, send_buf, send_len, "RSP");
     }
     else if (strcmp (uri, "/favicon.ico") == 0 &&
-            strcmp (method, "GET") == 0)
+             strcmp (method, "GET") == 0)
     {
         send_len = build_response_from_file ("favicon.ico", "image/x-icon", send_buf, sizeof (send_buf));
         http_send (csk, send_buf, send_len, "RSP");
     }
     else if (strcmp (uri, "/play") == 0 &&
-            strcmp (method, "POST") == 0)
+             strcmp (method, "POST") == 0)
     {
+        char *data = "Playing!";
+        send_len = build_response (data, strlen (data), "text/html", send_buf, sizeof (send_buf));
 
+        http_send (csk, send_buf, send_len, "RSP");
     }
     else if (strcmp (uri, "/test") == 0 &&
-            strcmp (method, "GET") == 0)
+             strcmp (method, "GET") == 0)
     {
         char *data = "Off";
 
@@ -367,9 +427,11 @@ http_read (struct web_server *web, int csk)
 
         http_send (csk, send_buf, send_len, "RSP");
         http_event_send (web, "Clicked");
+
+        event (EVENT_LAUNCH, NULL);
     }
     else if (strcmp (uri, "/events") == 0 &&
-            strcmp (method, "GET") == 0)
+             strcmp (method, "GET") == 0)
     {
         for (int i = 0; i < web->client_count; i++)
         {
@@ -378,10 +440,88 @@ http_read (struct web_server *web, int csk)
                 web->streaming |= (1 << i);
             }
         }
-        printf ("http: client:%d streaming:0b%b\n", csk, web->streaming);
+        // printf ("http: client:%d streaming:0b%b\n", csk, web->streaming);
 
         http_event_send_start (csk);
         http_event_send (web, app_state ());
+    }
+    else if (strstr (uri, "/movies"))
+    {
+        /**
+         * GET /movies/sonic-3.mp4 HTTP/1.1
+         * Host: 192.168.1.101:5001
+         * Connection: keep-alive
+         * User-Agent: Mozilla/5.0 (Linux; Android 8.0; Build/OPR2.170623.027.S16) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.0 Safari/537.36 CrKey/1.56.500000 DeviceType/AndroidTV
+         * Range: bytes=0-
+         * Accept-Encoding: identity;q=1, *;q=0
+         * Accept: *//*
+         * Accept-Language: en-GB
+         * CAST-DEVICE-CAPABILITIES: {"bluetooth_supported":false,"display_supported":true,"hi_res_audio_supported":false,"remote_control_input_supported":true,"touch_input_supported":false}
+         *
+         * https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Connection
+         * https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Range
+         * https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Accept-Encoding
+         */
+
+        char val[128] = {};
+        char *p = NULL;
+        parse_header (buf, nread, "Range", val, sizeof (val));
+        long long int bytes = 0;
+        p = strtok (val, "bytes="); 
+        printf ("bytes: '%s'\n", p);
+        long long int start = strtoll (p, NULL, 10);
+        printf ("bytes requested: %lld\n", start);
+        {
+            int fd = -1;
+            int wr = 0;
+            long fsize = 0;
+            char *file = "/mnt/usb/movies/sonic-3.mp4";
+            char *buf = send_buf;
+            int len = sizeof (send_buf);
+
+            fd = open (file, O_RDONLY | O_LARGEFILE);
+            if (fd > 0)
+            {
+                off_t total_len = lseek (fd, 0, SEEK_END);
+                if (total_len < 0)
+                {
+                    perror ("lseek END failed");
+                }
+
+                lseek (fd, start, SEEK_SET);
+
+                long long int read_len = read (fd, big_buf, sizeof (big_buf));
+
+                printf ("data len=%lld/%lld\n", start + read_len, total_len);
+                if (read_len < 0)
+                {
+                    printf ("Failed to read file (errno=%d '%s')\n", errno, strerror (errno));
+                }
+
+                wr += snprintf (buf + wr, len - wr, "HTTP/1.1 206 Partial Content\r\n");
+                wr += snprintf (buf + wr, len - wr, "Content-Type: %s\r\n", "video/mp4");
+                wr += snprintf (buf + wr, len - wr, "Content-Range: bytes %lld-%lld/%lld\r\n", start, start + read_len, total_len);
+                wr += snprintf (buf + wr, len - wr, "Content-Length: %lld\r\n", read_len);
+                wr += snprintf (buf + wr, len - wr, "Accept-Ranges: bytes\r\n");
+
+                wr += snprintf (buf + wr, len - wr, "\r\n");
+                memcpy (buf + wr, big_buf, read_len);
+                wr += read_len;
+                wr += snprintf (buf + wr, len - wr, "\r\n");
+
+                printf ("response len=%d\n", wr);
+
+                close (fd);
+
+                send_len = wr;
+            }
+            else
+            {
+                printf ("Failed to open file '%s' (errno=%d '%s')\n", file, errno, strerror (errno));
+            }
+        }
+
+        http_send (csk, send_buf, send_len, "RSP");
     }
     else
     {

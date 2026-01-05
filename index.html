@@ -7,6 +7,20 @@
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/css/bootstrap.min.css">
     <link rel="icon" href="/favicon.ico">
     <script>
+        function play(id) {
+            console.log('play: id:', id);
+
+            var xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function() {
+                if (this.readyState == 4 && this.status == 200) {
+                    var text = document.getElementById(id).innerHTML;
+                    document.getElementById(id).innerHTML = '<b>' + text + '</b> (' + this.responseText + ')';
+                }
+            };
+            xhr.open("POST", "/play", true);
+            xhr.send(id);
+        }
+
         function test() {
             var xhr = new XMLHttpRequest();
             xhr.onreadystatechange = function() {
@@ -20,6 +34,8 @@
 
         var reconnect_freq_sec = 1;
         var es;
+        var events;
+        var max = 10; // 64
 
         function reconnect() {
             console.log('ehsa: reconnect in ' + reconnect_freq_sec + ' seconds');
@@ -27,8 +43,8 @@
             setTimeout(event_source_setup, reconnect_freq_sec * 1000);
 
             reconnect_freq_sec *= 2;
-            if (reconnect_freq_sec >= 64) {
-                reconnect_freq_sec = 64;
+            if (reconnect_freq_sec >= max) {
+                reconnect_freq_sec = max;
             }
         }
 
@@ -38,12 +54,28 @@
             es = new EventSource('/events');
             es.onmessage = function(e) {
                 console.log('ehsa: ' + event.data);
-                document.getElementById('status').textContent = event.data;
+
+                // TODO: we could populate the list via the events?
+                // - send a list of movie names & ids and build <li>'s out of them?
+
+                events.unshift(event.data + '<br>');
+                if (events.length > 10) {
+                    events.length = 10;
+                }
+
+                var str = '';
+                for (var i = 0; i < events.length; i++)
+                {
+                    str += events[events.length - i - 1]; 
+                }
+
+                document.getElementById('status').innerHTML = str;
 
             };
             es.onopen = function(e) {
                 console.log('ehsa: open');
                 reconnect_freq_sec = 1;
+                events = [];
             };
             es.onerror = function(e) {
                 console.log('ehsa: error');
@@ -64,9 +96,9 @@
     <h4 id="status"></h4>
     <form action="/play" method="post" id="play-form"/>
     <ul class="list-group">
-        <li class="list-group-item">hi</li>
-        <li class="list-group-item">hey</li>
-        <li class="list-group-item active">hello there</li>
+        <li class="list-group-item" onclick="play(id)" id="li_0">hi</li>
+        <li class="list-group-item" onclick="play(id)" id="li_1">hey</li>
+        <li class="list-group-item active" href="#" id="li_2">hello there</li>
     </ul>
     <button class="btn" type="button" onclick="test()" id="demo">On</button>
 </body>

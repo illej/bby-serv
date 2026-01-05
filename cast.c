@@ -8,12 +8,17 @@
 
 #include <pb_encode.h>
 #include <pb_decode.h>
-#include "pb_encode.c"
-#include "pb_decode.c"
-#include "pb_common.c"
 #include "cast_channel.pb.h"
 
 #include <tiny-json.h>
+
+#ifdef UNITY_BUILD
+#include "tiny-json.c"
+#include "pb_encode.c"
+#include "pb_decode.c"
+#include "pb_common.c"
+#include "cast_channel.pb.c"
+#endif
 
 #define OPENSSL_DUMP_ERR() \
     do { \
@@ -23,6 +28,19 @@
             printf ("OpenSSL Error: %s\n", ERR_error_string (err, NULL)); \
         } \
     } while (0)
+
+#define JSON_INT(DATA, KEY, J) \
+    ((DATA && (J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_INTEGER) ? json_getInteger (J) : -1) 
+#define JSON_STR(DATA, KEY, J) \
+    ((DATA && (J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_TEXT) ? (char *) json_getValue (J) : NULL) 
+#define JSON_OBJ(DATA, KEY, J) \
+    ((DATA && (J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_OBJ) ? J : NULL)
+#define JSON_ARRAY(DATA, KEY, J) \
+    ((DATA && (J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_ARRAY) ? J : NULL)
+
+// "d5949efb-54d9-4698-ad2b-8d0c631e9bf2" + '\0'
+#define TRANSPORT_ID_LEN 37
+static char G_transport_id[TRANSPORT_ID_LEN];
 
 static void
 json_dump (json_t const *json, int indent)
@@ -210,6 +228,160 @@ decode_tag (u8 *buf, size_t len, struct tag *tag)
 }
 
 static void
+handle_connection (extensions_api_cast_channel_CastMessage *rmsg)
+{
+    printf ("cast: RECV [%s] <- %s: %s\n", rmsg->namespace.arg, rmsg->source_id.arg, rmsg->payload_utf8.arg);
+    if (strstr (rmsg->payload_utf8.arg, "CLOSE"))
+    {
+        printf ("cast:  reset!\n");
+        event (EVENT_RESET, NULL);
+    }
+}
+
+static void
+handle_heartbeat (extensions_api_cast_channel_CastMessage *rmsg)
+{
+//    printf ("cast: RECV [%s] <- %s: %s\n", rmsg->namespace.arg, rmsg->source_id.arg, rmsg->payload_utf8.arg);
+
+    if (strstr (rmsg->payload_utf8.arg, "PING"))
+    {
+        int delay = 0;
+
+        timer_cancel (RESET);
+        enqueue (TLS_SEND_PONG, delay);
+        enqueue (RESET, delay + 10000);
+    }
+    else if (strstr (rmsg->payload_utf8.arg, "PONG"))
+    {
+        int delay = 5000;
+
+        timer_cancel (RESET);
+        enqueue (TLS_SEND_PING, delay);
+        enqueue (RESET, delay + 10000);
+    }
+}
+
+static void
+handle_receiver (extensions_api_cast_channel_CastMessage *rmsg, SSL *ssl)
+{
+    json_t pool[128];
+    const json_t *data;
+    const json_t *_j;
+
+    printf ("cast: RECV [%s] <- %s\n", rmsg->namespace.arg, rmsg->source_id.arg);
+
+    data = json_create (rmsg->payload_utf8.arg, pool, sizeof (pool));
+    if (data)
+    {
+        char *type = JSON_STR (data, "type", _j);
+
+//         json_dump (data, 0);
+        printf ("cast:  type:%s\n", type ? type : "--");
+
+        if (type && strcmp (type, "RECEIVER_STATUS") == 0)
+        {
+            printf ("cast:  running applications:\n");
+
+            json_t const *status = json_getProperty (data, "status");
+            if (status && json_getType (status) == JSON_OBJ)
+            {
+                json_t const *applications = json_getProperty (status, "applications");
+                if (applications && json_getType (applications) == JSON_ARRAY)
+                {
+                    json_t const *item;
+                    for (item = json_getChild (applications); item; item = json_getSibling (item))
+                    {
+                        if (json_getType (item) == JSON_OBJ)
+                        {
+                            printf ("cast:  > %s\n", json_getPropertyValue (item, "displayName"));
+                            printf ("cast:    appId            : %s\n", json_getPropertyValue (item, "appId"));
+                            printf ("cast:    status-text      : %s\n", json_getPropertyValue (item, "statusText"));
+                            printf ("cast:    transport-id     : %s\n", json_getPropertyValue (item, "transportId"));
+                            printf ("cast:    sender-connected : %s\n", json_getPropertyValue (item, "senderConnected"));
+
+                            char const *app_id = json_getPropertyValue (item, "appId");
+                            char const *transport_id = json_getPropertyValue (item, "transportId");
+
+                            if (strcmp (app_id, "CC1AD845") == 0)
+                            {
+                                memcpy (G_transport_id, transport_id, sizeof (G_transport_id));
+                                printf ("cast: Default Media App is running (transport-id=%s)\n", G_transport_id);
+
+                                printf ("cast: > CONNECTING TO APP (%s)\n", transport_id);
+                                tls_send_msg (ssl, connection_ns, connect_msg, (char *) transport_id);
+
+                                char const *connected = json_getPropertyValue (item, "senderConnected");
+                                if (connected && strcmp (connected, "true") == 0)
+                                {
+                                    printf ("cast: > LOADING\n");
+                                    event (EVENT_LOAD, (char *) transport_id);
+                                }
+                                else
+                                {
+                                //    printf ("cast: > CONNECTING TO APP (%s)\n", transport_id);
+                                //    tls_send_msg (ssl, connection_ns, connect_msg, (char *) transport_id);
+                                }
+                            }
+                            else
+                            {
+                                char status[APP_INFO_LEN] = {};
+
+                                char const *name = json_getPropertyValue (item, "displayName");
+                                snprintf (status, sizeof (status), "Playing: %s", name);
+                                event (EVENT_UPDATE, status);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else if (type && strcmp (type, "GET_APP_AVAILABILITY") == 0)
+        {
+            json_t const *availability = json_getProperty (data, "availability");
+            if (availability && json_getType (availability) == JSON_OBJ)
+            {
+                printf ("cast: default media player='%s'\n", json_getPropertyValue (availability, "CC1AD845"));
+            }
+        }
+        else if (type && strcmp (type, "LAUNCH_STATUS") == 0)
+        {
+            // TODO: I think this is all useless??
+            //
+            char *status = JSON_STR (data, "status", _j);
+            printf ("cast: %s\n", status);
+            if (status && strcmp (status, "USER_ALLOWED") == 0)
+            {
+                // TODO:
+                // - connect to media app with transport-id as destination-id
+                // - should then start receiving broadcast MEDIA_STATUS messages
+                // - send LOAD message on ".media" namespace (https://developers.google.com/cast/docs/media/messages#Load)
+                // - send PLAY message on ".media" namespace (https://developers.google.com/cast/docs/media/messages#Play)
+                // https://developers.google.com/cast/docs/media/messages
+                // media: { "contentId": <filename?>, "streamType": "BUFFERED", "contentType": "video/mp4" }
+#if 0
+                char msgstr[1024] = {};
+                snprintf (msgstr, sizeof (msgstr), "{\"type\": \"LOAD\", \"requestId\": 17, \"media\": {\"contentId\": \"%s\", \"streamType\": \"BUFFERED\", \"contentType\": \"%s\"}}", "sonic-3.mp4", "video/mp4");
+                tls_send_msg (ssl, media_ns, msgstr);
+#endif
+                //char msg[1024] = {};
+                //tls_send_msg (ssl, connection_ns, connect_msg, G_transport_id);
+            }
+        }
+    }
+    else
+    {
+        printf ("Failed to parse json\n");
+    }
+}
+
+static void
+handle_media (extensions_api_cast_channel_CastMessage *rmsg)
+{
+    printf ("cast: RECV [%s] <- %s\n", rmsg->namespace.arg, rmsg->source_id.arg);
+    printf ("> UNHANDLED!\n");
+}
+
+static void
 parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
 {
     extensions_api_cast_channel_CastMessage rmsg = extensions_api_cast_channel_CastMessage_init_zero;
@@ -277,65 +449,29 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
     //printf ("decode ok=%d\n", ret);
     if (ret)
     {
-//        printf ("version        : %d\n", rmsg.protocol_version);
-//        printf ("source-id      : %s\n", (char *) rmsg.source_id.arg);
-//        printf ("destination-id : %s\n", (char *) rmsg.destination_id.arg);
-//        printf ("namespace      : %s\n", (char *) rmsg.namespace.arg);
-//        printf ("payload-utf8   : %s\n", (char *) rmsg.payload_utf8.arg);
-
         bool ok;
 
-        /* We've received valid messages from the chromecast so we're now
-         * officially connected */
         event (EVENT_CONNECTED, NULL);
 
-        if (strstr (rmsg.payload_utf8.arg, "PING"))
+        if (strstr (rmsg.namespace.arg, "connection"))
         {
-            printf ("tls: <- PING\n");
-            enqueue (TLS_SEND_PONG, 0);
-#if 0
-            ok = send_msg (ssl, send_buf, sizeof (send_buf), heartbeat_ns, pong_msg);
-            if (ok)
-            {
-                printf ("> PONG\n");
-
-                if (0)
-                    http_event_send ("Connected");
-            }
-            if (0)
-                send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
-            if (0)
-                send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_app_availability_msg);
-            if (0)
-                send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, launch_msg);
-#endif
+            handle_connection (&rmsg);
         }
-        else if (strstr (rmsg.payload_utf8.arg, "PONG"))
+        else if (strstr (rmsg.namespace.arg, "heartbeat"))
         {
-            printf ("tls: <- P0NG\n");
-            enqueue (TLS_SEND_PING, 5000);
-
+            handle_heartbeat (&rmsg);
         }
         else if (strstr (rmsg.namespace.arg, "receiver"))
         {
-            json_t pool[128];
-            const json_t *data;
-
-            printf ("Parsing JSON\n");
-
-#define JSON_INT(DATA, KEY, J) (((J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_INTEGER) ? json_getInteger (J) : -1) 
-#define JSON_STR(DATA, KEY, J) (((J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_TEXT) ? json_getValue (J) : NULL) 
-#define JSON_OBJ(DATA, KEY, J) (((J = json_getProperty (DATA, KEY)) && json_getType (J) == JSON_OBJ) ? json_getValue (J) : NULL) 
-            
-            data = json_create (rmsg.payload_utf8.arg, pool, sizeof (pool));
-            if (data)
-            {
-                json_dump (data, 0);
-            }
-            else
-            {
-                printf ("Failed to parse json\n");
-            }
+            handle_receiver (&rmsg, ssl);
+        }
+        else if (strstr (rmsg.namespace.arg, "media"))
+        {
+            handle_media (&rmsg);
+        }
+        else
+        {
+            printf ("cast: Unhandled namespace: '%s'\n", rmsg.namespace.arg);
         }
     }
     else
@@ -351,7 +487,7 @@ parse_recv_msg (u8 *buf, size_t len, SSL *ssl)
 
 
 bool
-tls_send_msg (SSL *ssl, const char *namespace, const char *payload)
+tls_send_msg (SSL *ssl, const char *namespace, const char *payload, char *destination)
 {
     static uint8_t send_buf[4094];
     size_t send_len = sizeof (send_buf);
@@ -367,7 +503,7 @@ tls_send_msg (SSL *ssl, const char *namespace, const char *payload)
     msg.protocol_version = extensions_api_cast_channel_CastMessage_ProtocolVersion_CASTV2_1_0;
     msg.source_id.arg = (void *) "sender-0";
     msg.source_id.funcs.encode = encode_string;
-    msg.destination_id.arg = (void *) "receiver-0";
+    msg.destination_id.arg = (void *) destination; // "receiver-0";
     msg.destination_id.funcs.encode = encode_string;
     msg.namespace.arg = (void *) namespace;
     msg.namespace.funcs.encode = encode_string;
@@ -386,6 +522,10 @@ tls_send_msg (SSL *ssl, const char *namespace, const char *payload)
         ok = SSL_write_ex (ssl, send_buf, stream.bytes_written + 4, &wr);
         if (ok)
         {
+            if (!strstr (namespace, "heartbeat"))
+            {
+                printf ("cast: SEND [%s] -> %s: %s\n", namespace, destination, payload);
+            }
 //            hex_dump (send_buf, wr);
         }
     }
@@ -412,13 +552,13 @@ tls_socket_setup (int *out_sk, char *ip)
     int sk;
     bool ok;
 
-    printf ("tls: socket setup\n");
+    // printf ("tls: socket setup\n");
     
     SSL_library_init ();
     SSL_load_error_strings ();
 
     sk = socket (AF_INET, SOCK_STREAM, 0);
-    printf ("tls: socket=%d\n", sk);
+    // printf ("tls: socket=%d\n", sk);
     if (sk > -1)
     {
         addr.sin_family = AF_INET;
@@ -456,13 +596,9 @@ tls_socket_setup (int *out_sk, char *ip)
 
                 *out_sk = sk;
 
-                ok = tls_send_msg (ssl, connection_ns, connect_msg);
+                ok = tls_send_msg (ssl, connection_ns, connect_msg, "receiver-0");
                 if (ok)
                 {
-#if 0
-                    ok = send_msg (ssl, send_buf, sizeof (send_buf), receiver_ns, get_status_msg);
-                    printf ("TLS: send GET_STATUS: %s\n", ok ? "OK" : "Failed");
-#endif
 
                 }
                 else

@@ -28,13 +28,18 @@ struct delayed_msg
 };
 
 void enqueue (int type, int delay);
+void timer_cancel (int type);
+
+static bool
+is_ascii (char val)
+{
+    return 31 < val && val < 127;
+}
 
 static char
-ascii_ (uint8_t val)
+to_ascii (uint8_t val)
 {
-    if (val > 31 && val < 127)
-        return val;
-    return '.';
+    return is_ascii (val) ? val : '.';
 }
 
 static void
@@ -58,7 +63,7 @@ hex_dump (u8 *buf, size_t len)
         }
 
         linep += sprintf (linep, "%02x ", buf[i]);
-        asciip += sprintf (asciip, "%c ", ascii_ (buf[i]));
+        asciip += sprintf (asciip, "%c ", to_ascii (buf[i]));
     }
 
     if (linep != line)
