@@ -6,19 +6,60 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/css/bootstrap.min.css">
     <link rel="icon" href="/favicon.ico">
+    <style>
+        .info { color: blue; }
+        .error { color: red; }
+        .warning { color: yellow; }
+    </style>
     <script>
-        function play(id) {
-            console.log('play: id:', id);
+        debug = [];
+
+        window.onerror = (a, b, c, d, e) => {
+            log(`message: ${a} source: ${b} lineno: ${c} colno: ${d} error: ${e}`);
+            return true;
+        };
+
+        String.prototype.fmt = function() {
+            var args = arguments;
+            return this.replace(/\{(\d+)\}/g, function (m, n) { return args[n]; });
+        };
+
+        function log(msg) {
+            var toaster = document.getElementById('toaster');
+            var str = '';
+
+            debug.unshift('<p class="debug">[{0}]: {1}</p>'.fmt(new Date(Date.now()).toLocaleString(), msg));
+            if (debug.length > 5) {
+                debug.length = 5;
+            }
+
+            for (var i = 0; i < debug.length; i++)
+            {
+                str += debug[debug.length - i - 1]; 
+            }
+
+            toaster.className = "show";
+            toaster.innerHTML = str;
+
+            setTimeout(function () {
+                toaster.className.replace("show", "");
+            }, 3000);
+        }
+
+        function play(e) {
+            console.log('play: event:', e);
+            console.log('play: this.id:', this.id);
+
+            const element = this;
 
             var xhr = new XMLHttpRequest();
             xhr.onreadystatechange = function() {
                 if (this.readyState == 4 && this.status == 200) {
-                    var text = document.getElementById(id).innerHTML;
-                    document.getElementById(id).innerHTML = '<b>' + text + '</b> (' + this.responseText + ')';
+                    console.log('play: ' + this.responseText);
                 }
             };
             xhr.open("POST", "/play", true);
-            xhr.send(id);
+            xhr.send('id=' + this.id);
         }
 
         function test() {
@@ -36,6 +77,7 @@
         var es;
         var events;
         var max = 10; // 64
+        var version = 0;
 
         function reconnect() {
             console.log('ehsa: reconnect in ' + reconnect_freq_sec + ' seconds');
@@ -49,14 +91,70 @@
         }
 
         function event_source_setup() {
-            console.log('ehsa: EventSource setup');
+            console.log("ehsa: EventSource setup");
 
             es = new EventSource('/events');
-            es.onmessage = function(e) {
-                console.log('ehsa: ' + event.data);
+            es.addEventListener('update', function(e) {
+                log("event.update: {0}".fmt(e.data));
+                console.log("event.update: data=%o", e.data);
 
-                // TODO: we could populate the list via the events?
-                // - send a list of movie names & ids and build <li>'s out of them?
+                const list = document.getElementById("track-list");
+                const data = JSON.parse(e.data);
+                const track_list = data["track-list"];
+
+                for (var i = 0; i < track_list.length; i++)
+                {
+                    const track = track_list[i];
+                    const element = document.getElementById(track.id);
+
+                    if (track.active)
+                        element.classList.add("active");
+                    else
+                        element.classList.remove("active");
+                }
+            });
+            es.addEventListener('hello', function(e) {
+                log("event.hello: {0}".fmt(e.data));
+                console.log("event.hello: %o", e.data);
+
+                const data = JSON.parse(e.data);
+                const new_version = parseInt(data.version);
+
+                if (version == 0) {
+                    version = new_version;
+                    console.log('event.hello: set version={0}'.fmt(new_version));
+                } else if (version != new_version) {
+                    console.log('event.hello: version miss-match {0} != {0}. reloading..'.fmt(version, new_version));
+                    version = new_version;
+                    window.location.reload();
+                }
+
+                const list = document.getElementById('track-list');
+                const track_list = data["track-list"];
+
+                while (list.firstChild) {
+                    list.removeChild(list.firstChild);
+                }
+
+                for (var i = 0; i < track_list.length; i++)
+                {
+                    const track = track_list[i];
+                    const item = document.createElement('li');
+
+                    item.innerHTML = track.name;
+                    item.id = track.id;
+                    item.classList.add("list-group-item");
+                    if (track.active)
+                        item.classList.add("active");
+                    item.addEventListener('click', play);
+
+                    list.appendChild(item);
+                }
+            });
+
+            es.onmessage = function(e) {
+                log("event.message: {0}".fmt(e.data));
+                console.log("event.message: " + e.data);
 
                 events.unshift(event.data + '<br>');
                 if (events.length > 10) {
@@ -73,12 +171,16 @@
 
             };
             es.onopen = function(e) {
-                console.log('ehsa: open');
+                log("event.open: connection opened");
+                console.log("event.open: connection opened");
+
                 reconnect_freq_sec = 1;
                 events = [];
             };
             es.onerror = function(e) {
-                console.log('ehsa: error');
+                log("event.error: connection failed");
+                console.error('event.error:', e);
+
                 es.close();
                 reconnect();
             };
@@ -93,12 +195,9 @@
 </head>
 <body class="container">
     <h3>Media Server</h3>
+    <div id="toaster"></div>
     <h4 id="status"></h4>
-    <form action="/play" method="post" id="play-form"/>
-    <ul class="list-group">
-        <li class="list-group-item" onclick="play(id)" id="li_0">hi</li>
-        <li class="list-group-item" onclick="play(id)" id="li_1">hey</li>
-        <li class="list-group-item active" href="#" id="li_2">hello there</li>
+    <ul class="list-group" id="track-list">
     </ul>
     <button class="btn" type="button" onclick="test()" id="demo">On</button>
 </body>

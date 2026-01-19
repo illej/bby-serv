@@ -17,7 +17,7 @@ struct web_server
 
 bool http_init (struct web_server *web, struct pollfd *clients, u16 port);
 void http_send (int sk, char *buf, size_t len, char *type);
-void http_event_send (struct web_server *web, char *msg);
+void http_event_send (struct web_server *web, char *type, char *msg);
 void http_event_send_start (int csk);
 void http_accept (struct web_server *web);
 int http_read (struct web_server *web, int csk);

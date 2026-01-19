@@ -51,10 +51,18 @@ struct movie
 {
     u8 index;
     char *name;
+    u32 id;
+    bool active;
 };
 
-static struct movie *movies;
-static int movie_count;
+struct track_list
+{
+    struct movie *items;
+    int count;
+    u32 active_id;
+};
+
+static struct track_list tracks;
 static struct action fsm[STATE_MAX][EVENT_MAX] = {
     [STATE_INIT]       [EVENT_RESET]     = { action_reset,   STATE_INIT        },
     [STATE_INIT]       [EVENT_FOUND]     = { action_connect, STATE_CONNECTING  },
@@ -76,12 +84,20 @@ static struct action fsm[STATE_MAX][EVENT_MAX] = {
  * - user selects movie via web app
  * - launch Default Media App, connect to Default Media App, load movie
  * - implement movie status & play/pause/stop
- * - when movie stops and no clients connected, close Default Media App
- * Next Immediate Steps:
- * > rework html and implement /play POST endpoint
- * > send 'refresh' header? to make page reload when index.html has changed
+ * - when movie stops, close Default Media App
  *
- * - parse movie metadata
+ * > rework html and implement /play POST endpoint
+ *
+ *
+ * - clean up state machine
+ * - figure out manifest & dynamic reloading (inotify)
+ * - movie list in memory, id hashes etc
+ * - sending sync & update messages to web clients
+ * - consolidate http resp/req/event message construction
+ * - web client page reloading on version change
+ * - figure out html styling, can we resize/reshape list items?
+ * - send email on crash or critical error
+ * - fixup http req string parsing
  */
 
 
@@ -257,7 +273,7 @@ event (int event, void *data)
         fsm[old_state][event].func (data);
         app.state = new_state;
 
-        http_event_send (&app.web, state_msg (msg, sizeof (msg)));
+        http_event_send (&app.web, NULL, state_msg (msg, sizeof (msg)));
     }
     else
     {
@@ -265,18 +281,15 @@ event (int event, void *data)
     }
 }
 
-
-
-
 static bool
 movie_list (void)
 {
-    const char *movie_dir = "/mnt/usb/movies";
+    const char *movie_dir = "/mnt/usb/movies"; // TODO: get this from a config file
     struct movie *movie;
     struct dirent *ent;
     DIR *dir;
 
-    movie_count = 0;
+    tracks.count = 0;
 
     dir = opendir (movie_dir);
     if (dir)
@@ -287,13 +300,14 @@ movie_list (void)
         {
             if (ent->d_type & DT_REG)
             {
-                movie_count++;
+                tracks.count++;
 
-                movies = realloc (movies, sizeof (struct movie) * movie_count);
+                tracks.items = realloc (tracks.items, sizeof (struct movie) * tracks.count);
 
-                movie = &movies[movie_count - 1];
-                movie->index = movie_count - 1;
+                movie = &tracks.items[tracks.count - 1];
+                movie->index = tracks.count - 1;
                 movie->name = strdup (ent->d_name);
+                movie->id = hash_str (movie->name);
             }
         }
     }
@@ -302,7 +316,63 @@ movie_list (void)
         printf ("Failed to open directory '%s'. errno=%d '%s'\n", movie_dir, errno, strerror (errno));
     }
 
-    return (movie_count > 0);
+    return (tracks.count > 0);
+}
+
+void
+track_list_build (struct buffer *b)
+{
+    buf_add_str (b, "\"track-list\": [");
+
+    for (int i = 0; i < tracks.count; i++)
+    {
+        struct movie *t = &tracks.items[i];
+
+        buf_add_str (b, "{\"name\": \"%s\", \"id\": %u", t->name, t->id);
+        if (t->active)
+        {
+            buf_add_str (b, ", \"active\": true");
+        }
+        buf_add_str (b, "}");
+
+        if (i != (tracks.count - 1))
+        {
+            buf_add_str (b, ",");
+        }
+    }
+
+    buf_add_str (b, "]");
+}
+
+// requested_id = 0 to turn all off
+void
+track_update_build (struct buffer *b, u32 requested_id)
+{
+    bool first = true;
+    int count = 0;
+    int stop_at = requested_id > 0 && tracks.active_id > 0 ? 2 : 1;
+
+    buf_add_str (b, "\"track-list\": [");
+    for (int i = 0; i < tracks.count; i++)
+    {
+        struct movie *t = &tracks.items[i];
+
+        if ((t->active && t->id != requested_id) ||
+            (!t->active && t->id == requested_id))
+        {
+            t->active = !t->active;
+
+            buf_add_str (b, "{\"id\": %u, \"active\": %s}", t->id, t->active ? "true" : "false");
+
+            if (++count != stop_at)
+            {
+                buf_add_str (b, ",");
+            }
+        }
+    }
+    buf_add_str (b, "]");
+
+    tracks.active_id = requested_id;
 }
 
 static void
@@ -323,7 +393,7 @@ do_send (struct delayed_msg *msg)
             // printf ("tls: -> PONG\n");
             break;
         case HTTP_SEND_KA:
-            http_event_send (&app.web, ":keep-alive");
+            http_event_send (&app.web, NULL, ":keep-alive");
             enqueue (HTTP_SEND_KA, 10000);
             break;
     }

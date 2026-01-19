@@ -1,6 +1,8 @@
 #ifndef _APP_H
 #define _APP_H
 
+#include "util.h"
+
 enum fds
 {
     MDNS_FD = 0,
@@ -16,5 +18,7 @@ enum fds
 
 char *app_state (void);
 int app_nfds (void);
+void track_list_build (struct buffer *b);
+void track_update_build (struct buffer *b, u32 requested_id);
 
 #endif
